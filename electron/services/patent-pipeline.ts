@@ -132,6 +132,161 @@ export class PatentPipelineService {
     return parts.length > 0 ? parts.join('\n') : JSON.stringify(ideas).slice(0, 2000)
   }
 
+  private buildSectionPrompt(
+    section: string,
+    isJp: boolean,
+    inventionDescription: string,
+    claims: string,
+    gapSummary: string,
+    priorArtDetailString: string,
+    priorArtForSpec: Array<{ index: number; patentNumber: string; title: string; abstract: string; relevanceNotes: string; category: string }>
+  ): string {
+    const isBackgroundSection = section === '背景技術' || section === 'Background Art'
+    const isProblemSection = section === '発明が解決しようとする課題' || section === 'Summary of Invention'
+
+    if (isBackgroundSection && priorArtForSpec.length > 0) {
+      // Specialized prompt for 背景技術: cite real patent numbers, show what prior art can/cannot do
+      if (isJp) {
+        const citations = priorArtForSpec.map(p =>
+          `- ${p.patentNumber}「${p.title}」`
+        ).join('\n')
+
+        return `「背景技術」セクションを日本国特許出願の明細書形式で起草してください。
+
+発明の説明:
+${inventionDescription}
+
+請求項:
+${claims}
+
+ギャップ分析:
+${gapSummary}
+
+以下の最も関連性の高い公知例（先行技術文献）を引用してください:
+${priorArtDetailString}
+
+【重要な構成要件】
+この「背景技術」セクションは、以下の構造に厳密に従ってください：
+
+1. まず、本発明が属する技術分野における従来技術の概況を簡潔に述べてください。
+
+2. 次に、以下の公知例を実際の特許番号を明記して2〜3件引用し、それぞれについて記述してください：
+${citations}
+
+   各公知例について以下の形式で記述してください：
+   (a) 「○○に関する技術として、${priorArtForSpec[0]?.patentNumber || '特開XXXX-XXXXXX号公報'}（以下、「特許文献X」という。）に記載された技術が知られている。」のように文献を導入する
+   (b) その公知例の技術内容を具体的に説明する（何ができるのか、どのような用途に使えるのか）
+   (c) しかし、その公知例には以下のような課題・限界がある、という形で問題点を明示する
+
+3. 最後に、これらの公知例に共通する技術的限界を総括し、本発明が解決すべき課題への橋渡しとなる記述で締めくくってください。
+
+特許文献の引用形式:
+- 日本特許: 特開XXXX-XXXXXX号公報、特願XXXX-XXXXXX号 等
+- 特許番号がJPで始まる場合は適切な日本語表記に変換してください
+  例: JP2020123456A → 特開2020-123456号公報
+  例: JPH10123456A → 特開平10-123456号公報
+- 米国特許: 米国特許第X,XXX,XXX号明細書 等
+
+セクションの見出しは含めず、本文のみを記述してください。`
+      } else {
+        return `Draft the "Background Art" section for a US patent specification.
+
+INVENTION:
+${inventionDescription}
+
+CLAIMS:
+${claims}
+
+GAP ANALYSIS:
+${gapSummary}
+
+Cite the following closest prior art references with their actual patent numbers:
+${priorArtDetailString}
+
+IMPORTANT STRUCTURAL REQUIREMENTS:
+Structure this Background Art section as follows:
+
+1. Briefly describe the general state of the art in the technical field.
+
+2. Cite 2-3 of the closest prior art references BY THEIR ACTUAL PATENT NUMBERS. For each reference:
+   (a) Introduce the reference formally (e.g., "U.S. Patent No. X,XXX,XXX to [inventor] discloses...")
+   (b) Describe what the prior art teaches — what it can do and what applications it serves
+   (c) Identify the specific limitations or shortcomings of that prior art — what it CANNOT do or fails to address
+
+3. Conclude with a summary of the common technical limitations across these prior art references, leading naturally into the problem that the present invention solves.
+
+Write ONLY the body text for the "Background Art" section. Do not include the section heading.`
+      }
+    }
+
+    if (isProblemSection && priorArtForSpec.length > 0) {
+      // Enhanced prompt for 課題 section: reference the prior art limitations identified above
+      if (isJp) {
+        return `「発明が解決しようとする課題」セクションを日本国特許出願の明細書形式で起草してください。
+
+発明の説明:
+${inventionDescription}
+
+請求項:
+${claims}
+
+ギャップ分析:
+${gapSummary}
+
+引用した先行技術文献:
+${priorArtDetailString}
+
+【重要な構成要件】
+1. 「背景技術」セクションで述べた公知例の問題点・限界を受けて、それらの具体的な課題を明確に記述してください。
+2. 先行技術文献で引用した特許番号（特許文献1、特許文献2等）を参照しながら、各公知例の限界がどのような技術的課題をもたらすかを論理的に説明してください。
+3. 「上記のような事情に鑑み、本発明は...を目的とする」のような形式で、本発明の目的を明確に述べてください。
+4. 本発明がこれらの課題をどのように解決するかの概要を簡潔に述べてください。
+
+この明細書セクションを日本語で書いてください。特許庁の書式に従ってください。
+セクションの見出しは含めず、本文のみを記述してください。`
+      }
+      // For US patents, Summary of Invention covers more than just the problem, so use a moderately enhanced prompt
+      return `Draft the "Summary of Invention" section for a US patent specification.
+
+INVENTION:
+${inventionDescription}
+
+CLAIMS:
+${claims}
+
+GAP ANALYSIS:
+${gapSummary}
+
+PRIOR ART REFERENCES CITED IN BACKGROUND:
+${priorArtDetailString}
+
+Structure this section to:
+1. Clearly state the technical problem arising from the limitations of the prior art references cited in the Background
+2. Provide a concise summary of how the present invention addresses these limitations
+3. Summarize the key aspects of the invention as defined in the claims
+
+Write in formal patent language following USPTO conventions.
+Write ONLY the content for the "Summary of Invention" section. Do not include the section heading.`
+    }
+
+    // Default prompt for other sections (技術分野, 課題を解決するための手段, 発明の効果, etc.)
+    return `Draft the "${section}" section for a ${isJp ? 'Japanese (JPO)' : 'US'} patent specification.
+
+INVENTION:
+${inventionDescription}
+
+CLAIMS:
+${claims}
+
+GAP ANALYSIS:
+${gapSummary}
+
+${priorArtForSpec.length > 0 ? `PRIOR ART REFERENCES (for context):\n${priorArtDetailString}\n` : ''}
+${isJp ? 'この明細書セクションを日本語で書いてください。特許庁の書式に従ってください。' : 'Write this specification section in formal patent language following USPTO conventions.'}
+
+Write ONLY the content for the "${section}" section. Do not include the section heading.`
+  }
+
   private isPaused(runId: string): boolean {
     const db = getDb()
     const row = db.prepare('SELECT status FROM patent_pipeline_runs WHERE id = ?').get(runId) as { status: string } | undefined
@@ -815,6 +970,25 @@ Return the improved claims.`,
     const gapSummary = this.summarizeGapAnalysis(run.gapAnalysis)
     const ideasSummary = this.summarizeIdeas(run.generatedIdeas)
 
+    // ── Load top prior art patents with real patent numbers for 背景技術 section ──
+    const db = getDb()
+    const topPriorArt = db.prepare(
+      'SELECT patent_number, title, abstract, relevance_score, relevance_notes, category FROM prior_art_patents WHERE pipeline_run_id = ? ORDER BY relevance_score DESC LIMIT 3'
+    ).all(runId) as Array<Record<string, unknown>>
+
+    const priorArtForSpec = topPriorArt.map((p, i) => ({
+      index: i + 1,
+      patentNumber: p.patent_number as string,
+      title: p.title as string,
+      abstract: (p.abstract as string || '').slice(0, 500),
+      relevanceNotes: p.relevance_notes as string || '',
+      category: p.category as string || ''
+    }))
+
+    const priorArtDetailString = priorArtForSpec.map(p =>
+      `[公知例${p.index}] ${p.patentNumber}「${p.title}」\n概要: ${p.abstract}\n関連性: ${p.relevanceNotes}`
+    ).join('\n\n')
+
     const spec: Record<string, string> = {}
 
     // ── Phase 1: Draft base sections ──
@@ -823,20 +997,8 @@ Return the improved claims.`,
       console.log(`[pipeline] Step 5: Drafting section ${i + 1}/${baseSections.length}: "${section}"`)
       this.sendProgress(window, runId, 5, 'drafting_spec', { phase: 'section', sectionIndex: i, sectionName: section, totalSections: baseSections.length })
 
-      const prompt = `Draft the "${section}" section for a ${isJp ? 'Japanese (JPO)' : 'US'} patent specification.
-
-INVENTION:
-${run.inventionDescription}
-
-CLAIMS:
-${claims}
-
-GAP ANALYSIS:
-${gapSummary}
-
-${isJp ? 'この明細書セクションを日本語で書いてください。特許庁の書式に従ってください。' : 'Write this specification section in formal patent language following USPTO conventions.'}
-
-Write ONLY the content for the "${section}" section. Do not include the section heading.`
+      // Use specialized prompts for prior-art-related sections
+      const prompt = this.buildSectionPrompt(section, isJp, run.inventionDescription, claims, gapSummary, priorArtDetailString, priorArtForSpec)
 
       const result = await llmService.chat({
         messages: [{ role: 'user', content: prompt }],
