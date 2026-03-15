@@ -1,3 +1,7 @@
+import https from 'node:https'
+import http from 'node:http'
+import { HttpsProxyAgent } from 'https-proxy-agent'
+
 // Simple rate limiter (same pattern as literature-api.ts)
 class RateLimiter {
   private lastCall: number = 0
@@ -15,6 +19,16 @@ class RateLimiter {
     }
     this.lastCall = Date.now()
   }
+}
+
+/**
+ * Resolve proxy URL from environment variables.
+ * Checks HTTPS_PROXY, https_proxy, HTTP_PROXY, http_proxy in order.
+ */
+function getProxyUrl(): string | null {
+  return process.env.HTTPS_PROXY || process.env.https_proxy
+    || process.env.HTTP_PROXY || process.env.http_proxy
+    || null
 }
 
 export interface PatentSearchResult {
@@ -515,6 +529,10 @@ export class PatentSearchApiService {
   /**
    * Fetch individual patent data from Google Patents (no auth required).
    * Parses HTML meta tags for bibliographic data.
+   *
+   * Supports corporate proxy environments:
+   * - Reads proxy from HTTPS_PROXY / HTTP_PROXY env vars
+   * - Disables TLS certificate verification to work behind MITM proxies
    */
   async fetchPatentFromGoogle(patentNumber: string): Promise<PatentSearchResult | null> {
     await this.googleLimiter.wait()
@@ -523,16 +541,8 @@ export class PatentSearchApiService {
     const url = `https://patents.google.com/patent/${cleanNumber}`
 
     try {
-      const response = await fetch(url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; RX-Research-App/0.1.0)',
-          'Accept': 'text/html,application/xhtml+xml'
-        }
-      })
-
-      if (!response.ok) return null
-
-      const html = await response.text()
+      const html = await this.fetchHtmlWithProxy(url)
+      if (!html) return null
 
       const title = this.extractMetaContent(html, 'DC.title')
         || this.extractMetaContent(html, 'citation_title')
@@ -568,6 +578,66 @@ export class PatentSearchApiService {
     } catch {
       return null
     }
+  }
+
+  /**
+   * Fetch HTML from a URL with proxy support and TLS verification disabled.
+   * Uses node:https directly to allow fine-grained control over TLS and proxy settings.
+   */
+  private async fetchHtmlWithProxy(url: string): Promise<string | null> {
+    const proxyUrl = getProxyUrl()
+
+    const requestOptions: https.RequestOptions = {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; RX-Research-App/0.1.0)',
+        'Accept': 'text/html,application/xhtml+xml'
+      },
+      // Disable TLS certificate verification for corporate proxy environments
+      // where the proxy performs MITM with its own CA certificate
+      rejectUnauthorized: false,
+      timeout: 30000
+    }
+
+    if (proxyUrl) {
+      console.log(`[patent-search] Using proxy: ${proxyUrl}`)
+      requestOptions.agent = new HttpsProxyAgent(proxyUrl, {
+        rejectUnauthorized: false
+      })
+    }
+
+    return new Promise<string | null>((resolve) => {
+      const parsedUrl = new URL(url)
+      const transport = parsedUrl.protocol === 'https:' ? https : http
+
+      const req = transport.get(url, requestOptions, (res) => {
+        // Follow redirects (Google Patents may redirect)
+        if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          this.fetchHtmlWithProxy(res.headers.location).then(resolve).catch(() => resolve(null))
+          return
+        }
+
+        if (res.statusCode && res.statusCode >= 400) {
+          resolve(null)
+          return
+        }
+
+        const chunks: Buffer[] = []
+        res.on('data', (chunk: Buffer) => chunks.push(chunk))
+        res.on('end', () => {
+          resolve(Buffer.concat(chunks).toString('utf-8'))
+        })
+        res.on('error', () => resolve(null))
+      })
+
+      req.on('error', (err) => {
+        console.warn(`[patent-search] Fetch error for ${url}: ${err.message}`)
+        resolve(null)
+      })
+      req.on('timeout', () => {
+        req.destroy()
+        resolve(null)
+      })
+    })
   }
 
   /**
