@@ -1,6 +1,6 @@
 import https from 'node:https'
 import http from 'node:http'
-import { HttpsProxyAgent } from 'https-proxy-agent'
+import tls from 'node:tls'
 
 // Simple rate limiter (same pattern as literature-api.ts)
 class RateLimiter {
@@ -582,61 +582,139 @@ export class PatentSearchApiService {
 
   /**
    * Fetch HTML from a URL with proxy support and TLS verification disabled.
-   * Uses node:https directly to allow fine-grained control over TLS and proxy settings.
+   * Uses node:https/http directly — no external proxy agent dependency.
+   * For HTTPS through a proxy, opens a CONNECT tunnel manually.
    */
-  private async fetchHtmlWithProxy(url: string): Promise<string | null> {
-    const proxyUrl = getProxyUrl()
+  private async fetchHtmlWithProxy(url: string, redirectCount = 0): Promise<string | null> {
+    if (redirectCount > 5) return null
 
-    const requestOptions: https.RequestOptions = {
+    const proxyUrl = getProxyUrl()
+    const target = new URL(url)
+    const isHttps = target.protocol === 'https:'
+
+    if (proxyUrl && isHttps) {
+      // HTTPS through proxy: open CONNECT tunnel, then TLS over it
+      return this.fetchViaTunnel(url, proxyUrl, redirectCount)
+    }
+
+    // Direct request (no proxy) or HTTP through proxy
+    const requestOptions: https.RequestOptions & http.RequestOptions = {
       headers: {
         'User-Agent': 'Mozilla/5.0 (compatible; RX-Research-App/0.1.0)',
         'Accept': 'text/html,application/xhtml+xml'
       },
-      // Disable TLS certificate verification for corporate proxy environments
-      // where the proxy performs MITM with its own CA certificate
       rejectUnauthorized: false,
       timeout: 30000
     }
 
-    if (proxyUrl) {
-      console.log(`[patent-search] Using proxy: ${proxyUrl}`)
-      requestOptions.agent = new HttpsProxyAgent(proxyUrl, {
-        rejectUnauthorized: false
-      })
-    }
+    const transport = isHttps ? https : http
 
     return new Promise<string | null>((resolve) => {
-      const parsedUrl = new URL(url)
-      const transport = parsedUrl.protocol === 'https:' ? https : http
-
       const req = transport.get(url, requestOptions, (res) => {
-        // Follow redirects (Google Patents may redirect)
         if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          this.fetchHtmlWithProxy(res.headers.location).then(resolve).catch(() => resolve(null))
+          const redirectUrl = new URL(res.headers.location, url).href
+          this.fetchHtmlWithProxy(redirectUrl, redirectCount + 1).then(resolve).catch(() => resolve(null))
           return
         }
-
-        if (res.statusCode && res.statusCode >= 400) {
-          resolve(null)
-          return
-        }
+        if (res.statusCode && res.statusCode >= 400) { resolve(null); return }
 
         const chunks: Buffer[] = []
         res.on('data', (chunk: Buffer) => chunks.push(chunk))
-        res.on('end', () => {
-          resolve(Buffer.concat(chunks).toString('utf-8'))
-        })
+        res.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')))
         res.on('error', () => resolve(null))
       })
-
       req.on('error', (err) => {
         console.warn(`[patent-search] Fetch error for ${url}: ${err.message}`)
         resolve(null)
       })
-      req.on('timeout', () => {
-        req.destroy()
+      req.on('timeout', () => { req.destroy(); resolve(null) })
+    })
+  }
+
+  /**
+   * Fetch HTTPS URL via HTTP CONNECT tunnel through a proxy.
+   * No external dependencies — uses node:http for the CONNECT handshake
+   * and node:tls to upgrade the tunneled socket.
+   */
+  private fetchViaTunnel(url: string, proxyUrl: string, redirectCount: number): Promise<string | null> {
+    const target = new URL(url)
+    const proxy = new URL(proxyUrl)
+    const targetPort = parseInt(target.port || '443', 10)
+
+    console.log(`[patent-search] Using proxy tunnel: ${proxy.host} → ${target.host}`)
+
+    return new Promise<string | null>((resolve) => {
+      const connectReq = http.request({
+        host: proxy.hostname,
+        port: parseInt(proxy.port || '8080', 10),
+        method: 'CONNECT',
+        path: `${target.hostname}:${targetPort}`,
+        timeout: 15000
+      })
+
+      connectReq.on('connect', (_res, socket) => {
+        // Upgrade to TLS over the tunneled socket, skip cert verification
+        const tlsSocket = tls.connect({
+          socket,
+          host: target.hostname,
+          servername: target.hostname,
+          rejectUnauthorized: false
+        }, () => {
+          // TLS handshake done — send the actual HTTP request over TLS
+          const reqPath = target.pathname + target.search
+          const reqHeaders = [
+            `GET ${reqPath} HTTP/1.1`,
+            `Host: ${target.hostname}`,
+            'User-Agent: Mozilla/5.0 (compatible; RX-Research-App/0.1.0)',
+            'Accept: text/html,application/xhtml+xml',
+            'Connection: close',
+            '',
+            ''
+          ].join('\r\n')
+
+          tlsSocket.write(reqHeaders)
+
+          const chunks: Buffer[] = []
+          tlsSocket.on('data', (chunk: Buffer) => chunks.push(chunk))
+          tlsSocket.on('end', () => {
+            const raw = Buffer.concat(chunks).toString('utf-8')
+            // Parse HTTP response: split headers from body
+            const headerEnd = raw.indexOf('\r\n\r\n')
+            if (headerEnd === -1) { resolve(null); return }
+
+            const headerBlock = raw.slice(0, headerEnd)
+            const body = raw.slice(headerEnd + 4)
+            const statusMatch = headerBlock.match(/^HTTP\/\d\.\d (\d{3})/)
+            const statusCode = statusMatch ? parseInt(statusMatch[1], 10) : 0
+
+            // Handle redirects
+            if (statusCode >= 300 && statusCode < 400) {
+              const locMatch = headerBlock.match(/[Ll]ocation:\s*(.+?)(?:\r?\n|$)/)
+              if (locMatch?.[1]) {
+                const redirectUrl = new URL(locMatch[1].trim(), url).href
+                this.fetchHtmlWithProxy(redirectUrl, redirectCount + 1).then(resolve).catch(() => resolve(null))
+                return
+              }
+            }
+
+            if (statusCode >= 400) { resolve(null); return }
+            resolve(body)
+          })
+          tlsSocket.on('error', () => resolve(null))
+        })
+
+        tlsSocket.on('error', (err) => {
+          console.warn(`[patent-search] TLS tunnel error: ${err.message}`)
+          resolve(null)
+        })
+      })
+
+      connectReq.on('error', (err) => {
+        console.warn(`[patent-search] Proxy CONNECT error: ${err.message}`)
         resolve(null)
       })
+      connectReq.on('timeout', () => { connectReq.destroy(); resolve(null) })
+      connectReq.end()
     })
   }
 
