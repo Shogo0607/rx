@@ -239,17 +239,10 @@ export function PatentSkill({ projectId }: SkillProps) {
       const embSection: { heading: string; body?: string; subsections: Array<{ heading: string; body?: string }> } = {
         heading: isJp ? '発明を実施するための形態' : 'Detailed Description of Preferred Embodiments',
         subsections: embodiments.map((emb) => {
-          const examplesText = (emb.examples?.length ?? 0) > 0
-            ? '\n\n' + emb.examples.map((ex) =>
-                isJp
-                  ? `【実施例${ex.exampleNumber}】${ex.title}\n${ex.content}`
-                  : `Example ${ex.exampleNumber}: ${ex.title}\n${ex.content}`
-              ).join('\n\n')
-            : ''
           const figRefs = emb.figures.map((f) =>
             isJp ? `\n\n【図${f.figureNumber}】${f.label}\n${f.description}` : `\n\nFIG. ${f.figureNumber} - ${f.label}\n${f.description}`
           ).join('')
-          return { heading: emb.title, body: emb.description + examplesText + figRefs }
+          return { heading: emb.title, body: emb.description + figRefs }
         })
       }
       sections.push(embSection)
@@ -1165,12 +1158,6 @@ export function PatentSkill({ projectId }: SkillProps) {
                               </span>
                               <span className="text-sm font-medium truncate">{emb.title}</span>
                               <div className="ml-auto flex items-center gap-1.5 shrink-0">
-                                {(emb.examples?.length ?? 0) > 0 && (
-                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-orange-500/20 text-orange-400">
-                                    <FlaskConical className="w-3 h-3 inline mr-0.5" />
-                                    {emb.examples.length} {template === 'jp-patent' ? '実施例' : 'ex'}
-                                  </span>
-                                )}
                                 {emb.figures.length > 0 && (
                                   <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-400">
                                     <ImageIcon className="w-3 h-3 inline mr-0.5" />
@@ -1199,50 +1186,6 @@ export function PatentSkill({ projectId }: SkillProps) {
                                     {emb.description.length.toLocaleString()} {template === 'jp-patent' ? '文字' : 'chars'}
                                   </div>
                                 </div>
-
-                                {/* ── Examples (実施例) for this embodiment ── */}
-                                {(emb.examples?.length ?? 0) > 0 && (
-                                  <div className="border-t border-border p-4">
-                                    <h4 className="text-xs font-semibold mb-3 flex items-center gap-1 text-orange-400">
-                                      <FlaskConical className="w-3.5 h-3.5" />
-                                      {template === 'jp-patent' ? '【実施例】' : 'Working Examples'}
-                                    </h4>
-                                    <div className="space-y-3">
-                                      {emb.examples.map((ex) => (
-                                        <div key={ex.exampleNumber} className="border border-orange-500/20 rounded-lg overflow-hidden">
-                                          <div className="px-3 py-2 bg-orange-500/10 flex items-center gap-2">
-                                            <span className="text-xs font-semibold text-orange-400">
-                                              {template === 'jp-patent' ? `実施例${ex.exampleNumber}` : `Example ${ex.exampleNumber}`}
-                                            </span>
-                                            <span className="text-xs text-muted-foreground">{ex.title}</span>
-                                          </div>
-                                          <div className="p-3">
-                                            <textarea
-                                              value={ex.content}
-                                              onChange={(e) => {
-                                                const newContent = e.target.value
-                                                setEmbodiments((prev) => prev.map((em) =>
-                                                  em.id === emb.id
-                                                    ? {
-                                                        ...em,
-                                                        examples: em.examples.map((exx) =>
-                                                          exx.exampleNumber === ex.exampleNumber ? { ...exx, content: newContent } : exx
-                                                        )
-                                                      }
-                                                    : em
-                                                ))
-                                              }}
-                                              className="w-full min-h-[120px] rounded-md bg-background border border-border p-2 text-sm outline-none focus:border-orange-500 resize-y leading-relaxed"
-                                            />
-                                            <div className="mt-1 text-[10px] text-muted-foreground">
-                                              {ex.content.length.toLocaleString()} {template === 'jp-patent' ? '文字' : 'chars'}
-                                            </div>
-                                          </div>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  </div>
-                                )}
 
                                 {/* Inline figures for this embodiment */}
                                 {emb.figures.length > 0 && (
@@ -1313,8 +1256,8 @@ export function PatentSkill({ projectId }: SkillProps) {
                   <div className="border border-dashed border-border rounded-lg p-6 text-center text-sm text-muted-foreground">
                     <BookOpen className="w-6 h-6 mx-auto mb-2 opacity-50" />
                     {template === 'jp-patent'
-                      ? 'パイプラインを実行すると、詳細な実施形態・実施例と図面が自動生成されます'
-                      : 'Run the pipeline to auto-generate detailed embodiments, examples, and figures'}
+                      ? 'パイプラインを実行すると、詳細な実施形態と図面が自動生成されます'
+                      : 'Run the pipeline to auto-generate detailed embodiments and figures'}
                   </div>
                 )}
               </div>

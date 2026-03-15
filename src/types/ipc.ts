@@ -208,16 +208,11 @@ export interface MermaidDiagram {
   mermaidCode: string
 }
 
-/** A single detailed embodiment with its own figures and examples */
+/** A single detailed embodiment with its own figures */
 export interface PatentEmbodiment {
   id: string
   title: string
   description: string
-  examples: Array<{
-    exampleNumber: number
-    title: string
-    content: string
-  }>
   figures: Array<{
     figureNumber: number
     label: string

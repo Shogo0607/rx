@@ -293,8 +293,8 @@ export class LLMService {
         }
 
         // Fall back to regular JSON prompting if json_schema not supported
-        if (err.message.includes('json_schema')) {
-          console.warn('[llm] json_schema not supported, falling back to json_object mode')
+        if (err.status === 400 || err.message.includes('json_schema')) {
+          console.warn(`[llm] json_schema not supported (${err.message}), falling back to json_object mode`)
           const fallbackMessages: ChatCompletionMessageParam[] = [
             {
               role: 'system',
