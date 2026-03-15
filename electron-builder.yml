@@ -1,0 +1,29 @@
+appId: com.rx.research-transformation
+productName: Research Transformation
+directories:
+  buildResources: build
+  output: release
+files:
+  - out
+  - package.json
+extraResources:
+  - from: templates
+    to: templates
+mac:
+  category: public.app-category.productivity
+  icon: build/icon.icns
+  target:
+    - dmg
+    - zip
+win:
+  icon: build/icon.ico
+  target:
+    - nsis
+linux:
+  icon: build/icon.png
+  target:
+    - AppImage
+    - deb
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true

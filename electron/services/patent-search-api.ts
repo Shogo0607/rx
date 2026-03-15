@@ -1,0 +1,620 @@
+// Simple rate limiter (same pattern as literature-api.ts)
+class RateLimiter {
+  private lastCall: number = 0
+  private minInterval: number
+
+  constructor(requestsPerSecond: number) {
+    this.minInterval = 1000 / requestsPerSecond
+  }
+
+  async wait(): Promise<void> {
+    const now = Date.now()
+    const elapsed = now - this.lastCall
+    if (elapsed < this.minInterval) {
+      await new Promise((resolve) => setTimeout(resolve, this.minInterval - elapsed))
+    }
+    this.lastCall = Date.now()
+  }
+}
+
+export interface PatentSearchResult {
+  patentNumber: string
+  title: string
+  abstract: string | null
+  applicant: string | null
+  inventors: string[]
+  filingDate: string | null
+  publicationDate: string | null
+  jurisdiction: string | null
+  classificationCodes: string[]
+  url: string | null
+  source: 'epo' | 'uspto' | 'google'
+}
+
+export interface PatentSearchResponse {
+  patents: PatentSearchResult[]
+  total: number
+}
+
+export interface PatentDetail extends PatentSearchResult {
+  claims: string | null
+  description: string | null
+  familyId: string | null
+}
+
+export interface PatentFamily {
+  familyId: string
+  members: Array<{
+    patentNumber: string
+    jurisdiction: string
+    publicationDate: string | null
+  }>
+}
+
+export interface PatentSearchOptions {
+  limit?: number
+  offset?: number
+  dateFrom?: string
+  dateTo?: string
+  jurisdiction?: string
+}
+
+// EPO OPS OAuth2 token management
+interface OAuthToken {
+  accessToken: string
+  expiresAt: number
+}
+
+export class PatentSearchApiService {
+  private epoLimiter = new RateLimiter(3) // EPO OPS: ~3 req/s reasonable
+  private usptoLimiter = new RateLimiter(5)
+  private googleLimiter = new RateLimiter(2) // Be polite to Google
+  private oauthToken: OAuthToken | null = null
+  private consumerKey: string = ''
+  private consumerSecret: string = ''
+
+  setCredentials(consumerKey: string, consumerSecret: string): void {
+    this.consumerKey = consumerKey
+    this.consumerSecret = consumerSecret
+    this.oauthToken = null // Reset token when credentials change
+  }
+
+  private async getEpoAccessToken(): Promise<string> {
+    if (this.oauthToken && Date.now() < this.oauthToken.expiresAt - 60000) {
+      return this.oauthToken.accessToken
+    }
+
+    if (!this.consumerKey || !this.consumerSecret) {
+      throw new Error('EPO OPS credentials not configured. Please set epo_consumer_key and epo_consumer_secret in Settings.')
+    }
+
+    const credentials = Buffer.from(`${this.consumerKey}:${this.consumerSecret}`).toString('base64')
+
+    const response = await fetch('https://ops.epo.org/3.2/auth/accesstoken', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Basic ${credentials}`,
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: 'grant_type=client_credentials'
+    })
+
+    if (!response.ok) {
+      if (response.status === 401) {
+        throw new Error('Invalid EPO OPS credentials. Please check your consumer key and secret.')
+      }
+      throw new Error(`EPO OPS auth error: ${response.status} ${response.statusText}`)
+    }
+
+    const data = await response.json() as { access_token: string; expires_in: number }
+    this.oauthToken = {
+      accessToken: data.access_token,
+      expiresAt: Date.now() + data.expires_in * 1000
+    }
+
+    return this.oauthToken.accessToken
+  }
+
+  async searchEpo(query: string, options: PatentSearchOptions = {}): Promise<PatentSearchResponse> {
+    await this.epoLimiter.wait()
+
+    const token = await this.getEpoAccessToken()
+    const limit = Math.min(options.limit || 25, 100)
+    const offset = options.offset || 1
+
+    // Build CQL query for EPO OPS
+    let cql = query
+    if (options.jurisdiction) {
+      cql += ` AND pn=${options.jurisdiction}`
+    }
+    if (options.dateFrom) {
+      cql += ` AND pd>=${options.dateFrom.replace(/-/g, '')}`
+    }
+    if (options.dateTo) {
+      cql += ` AND pd<=${options.dateTo.replace(/-/g, '')}`
+    }
+
+    const rangeEnd = offset + limit - 1
+    const encodedQuery = encodeURIComponent(cql)
+
+    const response = await fetch(
+      `https://ops.epo.org/3.2/rest-services/published-data/search?q=${encodedQuery}&Range=${offset}-${rangeEnd}`,
+      {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Accept': 'application/json'
+        }
+      }
+    )
+
+    if (!response.ok) {
+      if (response.status === 404) {
+        return { patents: [], total: 0 }
+      }
+      if (response.status === 429) {
+        throw new Error('EPO OPS rate limit exceeded. Please wait a moment.')
+      }
+      if (response.status === 403) {
+        this.oauthToken = null // Token may have expired
+        throw new Error('EPO OPS access forbidden. Token may have expired, please retry.')
+      }
+      throw new Error(`EPO OPS API error: ${response.status} ${response.statusText}`)
+    }
+
+    const data = await response.json() as Record<string, unknown>
+    return this.parseEpoSearchResponse(data)
+  }
+
+  private parseEpoSearchResponse(data: Record<string, unknown>): PatentSearchResponse {
+    const patents: PatentSearchResult[] = []
+    let total = 0
+
+    try {
+      const searchResult = (data as Record<string, Record<string, unknown>>)?.['ops:world-patent-data']?.['ops:biblio-search']
+      if (!searchResult) return { patents: [], total: 0 }
+
+      total = parseInt(String((searchResult as Record<string, unknown>)?.['@total-result-count'] || '0'), 10)
+
+      const results = (searchResult as Record<string, Record<string, unknown>>)?.['ops:search-result']?.['exchange-documents']
+      if (!results) return { patents: [], total }
+
+      const docs = Array.isArray(results) ? results : [results]
+
+      for (const doc of docs) {
+        try {
+          const parsed = this.parseEpoDocument(doc as Record<string, unknown>)
+          if (parsed) patents.push(parsed)
+        } catch {
+          // Skip unparseable documents
+        }
+      }
+    } catch {
+      // Return what we have
+    }
+
+    return { patents, total }
+  }
+
+  private parseEpoDocument(doc: Record<string, unknown>): PatentSearchResult | null {
+    const exchangeDoc = (doc as Record<string, Record<string, unknown>>)?.['exchange-document'] || doc
+    if (!exchangeDoc) return null
+
+    const docId = exchangeDoc as Record<string, unknown>
+    const country = String(docId?.['@country'] || '')
+    const docNumber = String(docId?.['@doc-number'] || '')
+    const kind = String(docId?.['@kind'] || '')
+    const patentNumber = `${country}${docNumber}${kind}`
+
+    // Extract bibliographic data
+    const biblio = (exchangeDoc as Record<string, Record<string, unknown>>)?.['bibliographic-data']
+    if (!biblio) return { patentNumber, title: 'Unknown', abstract: null, applicant: null, inventors: [], filingDate: null, publicationDate: null, jurisdiction: country, classificationCodes: [], url: null, source: 'epo' }
+
+    // Title
+    const titleData = biblio?.['invention-title']
+    let title = 'Unknown'
+    if (Array.isArray(titleData)) {
+      const enTitle = (titleData as Array<Record<string, unknown>>).find((t) => t?.['@lang'] === 'en')
+      title = String((enTitle || titleData[0])?.['$'] || (enTitle || titleData[0]) || 'Unknown')
+    } else if (titleData) {
+      title = String((titleData as Record<string, unknown>)?.['$'] || titleData || 'Unknown')
+    }
+
+    // Applicants
+    const applicantData = (biblio as Record<string, Record<string, unknown>>)?.['parties']?.['applicants']?.['applicant']
+    let applicant: string | null = null
+    if (applicantData) {
+      const appArr = Array.isArray(applicantData) ? applicantData : [applicantData]
+      const names = appArr.map((a: Record<string, unknown>) => {
+        const name = (a as Record<string, Record<string, unknown>>)?.['applicant-name']?.['name']
+        return String((name as Record<string, unknown>)?.['$'] || name || '')
+      }).filter(Boolean)
+      applicant = names.join('; ') || null
+    }
+
+    // Inventors
+    const inventorData = (biblio as Record<string, Record<string, unknown>>)?.['parties']?.['inventors']?.['inventor']
+    const inventors: string[] = []
+    if (inventorData) {
+      const invArr = Array.isArray(inventorData) ? inventorData : [inventorData]
+      for (const inv of invArr) {
+        const name = ((inv as Record<string, Record<string, unknown>>)?.['inventor-name']?.['name'])
+        const nameStr = String((name as Record<string, unknown>)?.['$'] || name || '')
+        if (nameStr) inventors.push(nameStr)
+      }
+    }
+
+    // Dates
+    const pubRef = biblio?.['publication-reference']
+    let publicationDate: string | null = null
+    if (pubRef) {
+      const docId2 = (pubRef as Record<string, Record<string, unknown>>)?.['document-id']
+      const dateArr = Array.isArray(docId2) ? docId2 : [docId2]
+      for (const d of dateArr) {
+        const dateStr = String((d as Record<string, unknown>)?.['date']?.['$'] || (d as Record<string, unknown>)?.['date'] || '')
+        if (dateStr && dateStr.length === 8) {
+          publicationDate = `${dateStr.slice(0, 4)}-${dateStr.slice(4, 6)}-${dateStr.slice(6, 8)}`
+          break
+        }
+      }
+    }
+
+    const appRef = biblio?.['application-reference']
+    let filingDate: string | null = null
+    if (appRef) {
+      const docId3 = (appRef as Record<string, Record<string, unknown>>)?.['document-id']
+      const dateArr = Array.isArray(docId3) ? docId3 : [docId3]
+      for (const d of dateArr) {
+        const dateStr = String((d as Record<string, unknown>)?.['date']?.['$'] || (d as Record<string, unknown>)?.['date'] || '')
+        if (dateStr && dateStr.length === 8) {
+          filingDate = `${dateStr.slice(0, 4)}-${dateStr.slice(4, 6)}-${dateStr.slice(6, 8)}`
+          break
+        }
+      }
+    }
+
+    // Classification codes
+    const classificationCodes: string[] = []
+    const classData = biblio?.['patent-classifications']?.['patent-classification'] || biblio?.['classifications-ipcr']?.['classification-ipcr']
+    if (classData) {
+      const classArr = Array.isArray(classData) ? classData : [classData]
+      for (const c of classArr) {
+        const text = String((c as Record<string, unknown>)?.['text']?.['$'] || (c as Record<string, unknown>)?.['text'] || '')
+        if (text) classificationCodes.push(text)
+      }
+    }
+
+    return {
+      patentNumber,
+      title,
+      abstract: null, // Abstract requires separate API call
+      applicant,
+      inventors,
+      filingDate,
+      publicationDate,
+      jurisdiction: country,
+      classificationCodes,
+      url: `https://worldwide.espacenet.com/patent/search?q=pn%3D${patentNumber}`,
+      source: 'epo'
+    }
+  }
+
+  async getPatentDetails(patentNumber: string): Promise<PatentDetail | null> {
+    await this.epoLimiter.wait()
+
+    const token = await this.getEpoAccessToken()
+
+    const response = await fetch(
+      `https://ops.epo.org/3.2/rest-services/published-data/publication/docdb/${patentNumber}/biblio,abstract`,
+      {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Accept': 'application/json'
+        }
+      }
+    )
+
+    if (!response.ok) {
+      if (response.status === 404) return null
+      throw new Error(`EPO OPS detail error: ${response.status} ${response.statusText}`)
+    }
+
+    const data = await response.json() as Record<string, unknown>
+
+    try {
+      const worldData = (data as Record<string, Record<string, Record<string, unknown>>>)?.['ops:world-patent-data']?.['exchange-documents']?.['exchange-document']
+      if (!worldData) return null
+
+      const parsed = this.parseEpoDocument(worldData as Record<string, unknown>)
+      if (!parsed) return null
+
+      // Extract abstract
+      const abstracts = (worldData as Record<string, Record<string, unknown>>)?.['abstract']
+      let abstractText: string | null = null
+      if (abstracts) {
+        const absArr = Array.isArray(abstracts) ? abstracts : [abstracts]
+        const enAbs = (absArr as Array<Record<string, unknown>>).find((a) => a?.['@lang'] === 'en')
+        const absData = enAbs || absArr[0]
+        const p = (absData as Record<string, unknown>)?.['p']
+        abstractText = String((p as Record<string, unknown>)?.['$'] || p || '')
+      }
+
+      return {
+        ...parsed,
+        abstract: abstractText,
+        claims: null,
+        description: null,
+        familyId: null
+      }
+    } catch {
+      return null
+    }
+  }
+
+  async getPatentFamily(patentNumber: string): Promise<PatentFamily | null> {
+    await this.epoLimiter.wait()
+
+    const token = await this.getEpoAccessToken()
+
+    const response = await fetch(
+      `https://ops.epo.org/3.2/rest-services/family/publication/docdb/${patentNumber}`,
+      {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Accept': 'application/json'
+        }
+      }
+    )
+
+    if (!response.ok) {
+      if (response.status === 404) return null
+      throw new Error(`EPO OPS family error: ${response.status} ${response.statusText}`)
+    }
+
+    const data = await response.json() as Record<string, unknown>
+
+    try {
+      const familyData = (data as Record<string, Record<string, Record<string, unknown>>>)?.['ops:world-patent-data']?.['ops:patent-family']
+      if (!familyData) return null
+
+      const familyId = String((familyData as Record<string, unknown>)?.['@family-id'] || patentNumber)
+      const members: PatentFamily['members'] = []
+
+      const familyMembers = (familyData as Record<string, unknown>)?.['ops:family-member']
+      if (familyMembers) {
+        const memArr = Array.isArray(familyMembers) ? familyMembers : [familyMembers]
+        for (const mem of memArr) {
+          const pubRef = (mem as Record<string, Record<string, unknown>>)?.['publication-reference']?.['document-id']
+          if (pubRef) {
+            const idArr = Array.isArray(pubRef) ? pubRef : [pubRef]
+            for (const id of idArr) {
+              const idObj = id as Record<string, unknown>
+              if (idObj?.['@document-id-type'] === 'docdb') {
+                const country = String(idObj?.['country']?.['$'] || idObj?.['country'] || '')
+                const docNum = String(idObj?.['doc-number']?.['$'] || idObj?.['doc-number'] || '')
+                const kind = String(idObj?.['kind']?.['$'] || idObj?.['kind'] || '')
+                const dateStr = String(idObj?.['date']?.['$'] || idObj?.['date'] || '')
+                let pubDate: string | null = null
+                if (dateStr && dateStr.length === 8) {
+                  pubDate = `${dateStr.slice(0, 4)}-${dateStr.slice(4, 6)}-${dateStr.slice(6, 8)}`
+                }
+                members.push({
+                  patentNumber: `${country}${docNum}${kind}`,
+                  jurisdiction: country,
+                  publicationDate: pubDate
+                })
+                break
+              }
+            }
+          }
+        }
+      }
+
+      return { familyId, members }
+    } catch {
+      return null
+    }
+  }
+
+  async searchUspto(query: string, options: PatentSearchOptions = {}): Promise<PatentSearchResponse> {
+    await this.usptoLimiter.wait()
+
+    const size = Math.min(options.limit || 25, 100)
+    const from = options.offset || 0
+
+    // PatentsView API v2 (POST-based, Elasticsearch DSL)
+    const requestBody = {
+      q: query,
+      f: ['patent_id', 'patent_title', 'patent_abstract', 'patent_date', 'assignees.assignee_organization', 'inventors.inventor_name_first', 'inventors.inventor_name_last'],
+      s: [{ patent_date: 'desc' }],
+      o: { size, from }
+    }
+
+    const response = await fetch('https://search.patentsview.org/api/v1/patent/', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': 'RX-Research-App/0.1.0'
+      },
+      body: JSON.stringify(requestBody)
+    })
+
+    if (!response.ok) {
+      if (response.status === 429) {
+        throw new Error('USPTO PatentsView rate limit exceeded. Please wait a moment.')
+      }
+      throw new Error(`USPTO PatentsView API error: ${response.status} ${response.statusText}`)
+    }
+
+    const data = await response.json() as {
+      patents?: Array<{
+        patent_id?: string
+        patent_title?: string
+        patent_abstract?: string
+        patent_date?: string
+        assignees?: Array<{ assignee_organization?: string }>
+        inventors?: Array<{ inventor_name_first?: string; inventor_name_last?: string }>
+      }>
+      total_patent_count?: number
+    }
+
+    const patents: PatentSearchResult[] = (data.patents || []).map((p) => ({
+      patentNumber: `US${p.patent_id || ''}`,
+      title: p.patent_title || 'Untitled',
+      abstract: p.patent_abstract || null,
+      applicant: p.assignees?.[0]?.assignee_organization || null,
+      inventors: (p.inventors || []).map((i) =>
+        [i.inventor_name_first, i.inventor_name_last].filter(Boolean).join(' ')
+      ),
+      filingDate: null,
+      publicationDate: p.patent_date || null,
+      jurisdiction: 'US',
+      classificationCodes: [],
+      url: p.patent_id ? `https://patents.google.com/patent/US${p.patent_id}` : null,
+      source: 'uspto' as const
+    }))
+
+    return { patents, total: data.total_patent_count || patents.length }
+  }
+
+  async searchAll(query: string, options: PatentSearchOptions = {}): Promise<PatentSearchResponse> {
+    const results = await Promise.allSettled([
+      this.searchEpo(query, options),
+      this.searchUspto(query, options)
+    ])
+
+    const allPatents: PatentSearchResult[] = []
+    let totalCount = 0
+
+    for (const result of results) {
+      if (result.status === 'fulfilled') {
+        allPatents.push(...result.value.patents)
+        totalCount += result.value.total
+      } else {
+        console.warn(`[patent-search] Source failed: ${result.reason}`)
+      }
+    }
+
+    // Deduplicate by patent number
+    const seen = new Set<string>()
+    const deduplicated = allPatents.filter((patent) => {
+      const key = patent.patentNumber.replace(/\s/g, '')
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+
+    return { patents: deduplicated, total: totalCount }
+  }
+
+  // ── No-auth methods (Google Patents) ──
+
+  hasEpoCredentials(): boolean {
+    return !!(this.consumerKey && this.consumerSecret)
+  }
+
+  /**
+   * Fetch individual patent data from Google Patents (no auth required).
+   * Parses HTML meta tags for bibliographic data.
+   */
+  async fetchPatentFromGoogle(patentNumber: string): Promise<PatentSearchResult | null> {
+    await this.googleLimiter.wait()
+
+    const cleanNumber = patentNumber.replace(/\s+/g, '')
+    const url = `https://patents.google.com/patent/${cleanNumber}`
+
+    try {
+      const response = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; RX-Research-App/0.1.0)',
+          'Accept': 'text/html,application/xhtml+xml'
+        }
+      })
+
+      if (!response.ok) return null
+
+      const html = await response.text()
+
+      const title = this.extractMetaContent(html, 'DC.title')
+        || this.extractMetaContent(html, 'citation_title')
+        || 'Unknown'
+      const abstract = this.extractMetaContent(html, 'DC.description')
+        || this.extractMetaContent(html, 'citation_abstract')
+      const inventors = this.extractAllMetaContent(html, 'DC.contributor')
+        .concat(this.extractAllMetaContent(html, 'citation_inventor'))
+        .filter((v, i, a) => a.indexOf(v) === i) // dedupe
+      const publicationDate = this.extractMetaContent(html, 'DC.date')
+        || this.extractMetaContent(html, 'citation_date')
+      const applicant = this.extractMetaContent(html, 'citation_assignee')
+
+      const countryMatch = cleanNumber.match(/^([A-Z]{2})/)
+      const jurisdiction = countryMatch ? countryMatch[1] : null
+
+      // Skip if we couldn't extract basic data
+      if (title === 'Unknown' && !abstract) return null
+
+      return {
+        patentNumber: cleanNumber,
+        title,
+        abstract: abstract || null,
+        applicant: applicant || null,
+        inventors,
+        filingDate: null,
+        publicationDate: publicationDate || null,
+        jurisdiction,
+        classificationCodes: [],
+        url,
+        source: 'google'
+      }
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Fetch multiple patents from Google Patents by patent numbers.
+   * No authentication required.
+   */
+  async fetchPatentsFromGoogle(patentNumbers: string[]): Promise<PatentSearchResponse> {
+    const results: PatentSearchResult[] = []
+
+    for (const num of patentNumbers) {
+      const patent = await this.fetchPatentFromGoogle(num)
+      if (patent) {
+        results.push(patent)
+      }
+    }
+
+    return { patents: results, total: results.length }
+  }
+
+  private extractMetaContent(html: string, name: string): string | null {
+    // Handle both <meta name="X" content="Y"> and <meta content="Y" name="X">
+    const patterns = [
+      new RegExp(`<meta\\s+name=["']${name}["']\\s+content=["']([^"']*)["']`, 'i'),
+      new RegExp(`<meta\\s+content=["']([^"']*)["']\\s+name=["']${name}["']`, 'i')
+    ]
+    for (const regex of patterns) {
+      const match = html.match(regex)
+      if (match?.[1]) return match[1]
+    }
+    return null
+  }
+
+  private extractAllMetaContent(html: string, name: string): string[] {
+    const results: string[] = []
+    const patterns = [
+      new RegExp(`<meta\\s+name=["']${name}["']\\s+content=["']([^"']*)["']`, 'gi'),
+      new RegExp(`<meta\\s+content=["']([^"']*)["']\\s+name=["']${name}["']`, 'gi')
+    ]
+    for (const regex of patterns) {
+      let match
+      while ((match = regex.exec(html)) !== null) {
+        if (match[1]) results.push(match[1])
+      }
+    }
+    return results
+  }
+}
+
+// Singleton instance
+export const patentSearchApiService = new PatentSearchApiService()

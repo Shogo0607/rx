@@ -1,0 +1,12 @@
+node_modules/
+dist/
+dist-electron/
+out/
+release/
+*.db
+*.db-journal
+.env
+.env.local
+.DS_Store
+thumbs.db
+*.log
