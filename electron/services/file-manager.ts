@@ -1,5 +1,5 @@
 import { app } from 'electron'
-import { join } from 'path'
+import { join, dirname, basename } from 'path'
 import { readFile as fsReadFile, writeFile as fsWriteFile, mkdir } from 'fs/promises'
 import { existsSync, createReadStream } from 'fs'
 import { createInterface } from 'readline'
@@ -23,7 +23,7 @@ export class FileManager {
    */
   async writeFile(filePath: string, data: Buffer | string): Promise<void> {
     // Ensure parent directory exists
-    const dir = filePath.substring(0, filePath.lastIndexOf('/'))
+    const dir = dirname(filePath)
     if (dir && !existsSync(dir)) {
       await mkdir(dir, { recursive: true })
     }
@@ -110,7 +110,7 @@ export class FileManager {
    */
   async copyToProject(projectId: string, sourcePath: string, subdir: string = 'files'): Promise<string> {
     const destDir = await this.getProjectSubDir(projectId, subdir)
-    const fileName = sourcePath.split('/').pop() || 'file'
+    const fileName = basename(sourcePath)
     const destPath = join(destDir, fileName)
 
     const data = await this.readFile(sourcePath)

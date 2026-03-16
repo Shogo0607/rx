@@ -1,4 +1,5 @@
 import { ipcMain } from 'electron'
+import { basename } from 'path'
 import { getDb } from '../services/database'
 import { fileManager } from '../services/file-manager'
 import { statisticsService } from '../services/statistics'
@@ -170,7 +171,7 @@ export function registerDatasetHandlers(): void {
       const destPath = await fileManager.copyToProject(input.projectId, input.filePath, 'datasets')
 
       // Determine file name for dataset name
-      const fileName = input.filePath.split('/').pop() || 'dataset'
+      const fileName = basename(input.filePath)
       const datasetName = input.name || fileName.replace(/\.[^.]+$/, '')
 
       const id = crypto.randomUUID()
