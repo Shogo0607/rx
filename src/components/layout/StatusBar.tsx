@@ -10,6 +10,7 @@ export function StatusBar() {
   const activeSkillId = useUiStore((s) => s.activeSkillId)
   const getSkill = useSkillStore((s) => s.getSkill)
   const getCurrentProject = useProjectStore((s) => s.getCurrentProject)
+  const defaultModel = useUiStore((s) => s.defaultModel)
   const llmLoading = useChatStore((s) => s.loading)
   const activeAgent = useChatStore((s) => s.activeAgent)
 
@@ -41,7 +42,7 @@ export function StatusBar() {
 
       {/* LLM status */}
       <div className="flex items-center gap-1.5">
-        <span>GPT-4o</span>
+        <span>{defaultModel}</span>
         <Circle
           className={`w-2 h-2 ${
             llmLoading

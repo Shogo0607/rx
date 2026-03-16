@@ -12,7 +12,10 @@ export function SettingsDialog() {
   const [apiKey, setApiKey] = useState('')
   const [baseUrl, setBaseUrl] = useState('')
   const [defaultModel, setDefaultModel] = useState('')
+  const [epoConsumerKey, setEpoConsumerKey] = useState('')
+  const [epoConsumerSecret, setEpoConsumerSecret] = useState('')
   const [showKey, setShowKey] = useState(false)
+  const [showEpoSecret, setShowEpoSecret] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -23,16 +26,21 @@ export function SettingsDialog() {
     setLoading(true)
     setSaved(false)
     setShowKey(false)
+    setShowEpoSecret(false)
 
     Promise.all([
       ipcInvoke('settings:get', 'openai_api_key'),
       ipcInvoke('settings:get', 'openai_base_url'),
-      ipcInvoke('settings:get', 'default_model')
+      ipcInvoke('settings:get', 'default_model'),
+      ipcInvoke('settings:get', 'epo_consumer_key'),
+      ipcInvoke('settings:get', 'epo_consumer_secret')
     ])
-      .then(([key, url, model]) => {
+      .then(([key, url, model, epoKey, epoSecret]) => {
         setApiKey(key ?? '')
         setBaseUrl(url ?? '')
         setDefaultModel(model ?? 'gpt-4o')
+        setEpoConsumerKey(epoKey ?? '')
+        setEpoConsumerSecret(epoSecret ?? '')
       })
       .catch((err) => {
         console.error('Failed to load settings:', err)
@@ -59,8 +67,11 @@ export function SettingsDialog() {
       await Promise.all([
         ipcInvoke('settings:set', { key: 'openai_api_key', value: apiKey }),
         ipcInvoke('settings:set', { key: 'openai_base_url', value: baseUrl }),
-        ipcInvoke('settings:set', { key: 'default_model', value: defaultModel || 'gpt-4o' })
+        ipcInvoke('settings:set', { key: 'default_model', value: defaultModel || 'gpt-4o' }),
+        ipcInvoke('settings:set', { key: 'epo_consumer_key', value: epoConsumerKey }),
+        ipcInvoke('settings:set', { key: 'epo_consumer_secret', value: epoConsumerSecret })
       ])
+      useUiStore.getState().setDefaultModel(defaultModel)
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
     } catch (err) {
@@ -80,7 +91,7 @@ export function SettingsDialog() {
       <div className="fixed inset-0 bg-black/50" onClick={() => setOpen(false)} />
 
       {/* Dialog */}
-      <div className="relative w-[480px] rounded-xl border border-border bg-popover shadow-2xl overflow-hidden animate-fade-in">
+      <div className="relative w-[480px] max-h-[85vh] rounded-xl border border-border bg-popover shadow-2xl overflow-hidden animate-fade-in flex flex-col">
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-border">
           <h2 className="text-base font-semibold">{t('settings.title')}</h2>
@@ -93,7 +104,7 @@ export function SettingsDialog() {
         </div>
 
         {/* Body */}
-        <div className="px-5 py-5 space-y-5">
+        <div className="px-5 py-5 space-y-5 overflow-y-auto">
           {loading ? (
             <div className="flex items-center justify-center py-8">
               <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
@@ -154,6 +165,54 @@ export function SettingsDialog() {
                   className="w-full px-3 py-2 text-sm rounded-md border border-border bg-background outline-none focus:border-primary transition-colors"
                 />
                 <p className="text-[11px] text-muted-foreground">{t('settings.defaultModelHint')}</p>
+              </div>
+
+              {/* EPO OPS Section */}
+              <div className="border-t border-border pt-5">
+                <h3 className="text-sm font-semibold mb-4">{t('settings.epoTitle')}</h3>
+
+                {/* EPO Consumer Key */}
+                <div className="space-y-1.5 mb-4">
+                  <label className="text-sm font-medium">{t('settings.epoConsumerKey')}</label>
+                  <input
+                    type="text"
+                    value={epoConsumerKey}
+                    onChange={(e) => setEpoConsumerKey(e.target.value)}
+                    placeholder=""
+                    className="w-full px-3 py-2 text-sm rounded-md border border-border bg-background outline-none focus:border-primary transition-colors"
+                  />
+                </div>
+
+                {/* EPO Consumer Secret */}
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium">{t('settings.epoConsumerSecret')}</label>
+                  <div className="relative">
+                    <input
+                      type={showEpoSecret ? 'text' : 'password'}
+                      value={showEpoSecret ? epoConsumerSecret : (epoConsumerSecret ? epoConsumerSecret.slice(0, 4) + '...' + epoConsumerSecret.slice(-4) : '')}
+                      onChange={(e) => {
+                        setShowEpoSecret(true)
+                        setEpoConsumerSecret(e.target.value)
+                      }}
+                      onFocus={() => setShowEpoSecret(true)}
+                      placeholder=""
+                      className="w-full px-3 py-2 pr-10 text-sm rounded-md border border-border bg-background outline-none focus:border-primary transition-colors"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowEpoSecret(!showEpoSecret)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded hover:bg-accent transition-colors"
+                    >
+                      {showEpoSecret ? (
+                        <EyeOff className="w-3.5 h-3.5 text-muted-foreground" />
+                      ) : (
+                        <Eye className="w-3.5 h-3.5 text-muted-foreground" />
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                <p className="text-[11px] text-muted-foreground mt-2">{t('settings.epoHint')}</p>
               </div>
             </>
           )}

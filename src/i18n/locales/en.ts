@@ -992,6 +992,10 @@ const en = {
   'settings.defaultModel': 'Default Model',
   'settings.defaultModelHint': 'Model used for AI features (e.g. gpt-4o, gpt-4o-mini).',
   'settings.saved': 'Saved',
+  'settings.epoTitle': 'EPO OPS (Patent Search API)',
+  'settings.epoConsumerKey': 'Consumer Key',
+  'settings.epoConsumerSecret': 'Consumer Secret',
+  'settings.epoHint': 'EPO OPS API credentials for prior art search. Falls back to Google Patents if not configured.',
 } as const
 
 export default en

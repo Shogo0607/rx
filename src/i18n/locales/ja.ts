@@ -994,6 +994,10 @@ const ja: typeof en = {
   'settings.defaultModel': 'デフォルトモデル',
   'settings.defaultModelHint': 'AI機能で使用するモデル（例: gpt-4o, gpt-4o-mini）。',
   'settings.saved': '保存しました',
+  'settings.epoTitle': 'EPO OPS（特許検索API）',
+  'settings.epoConsumerKey': 'Consumer Key',
+  'settings.epoConsumerSecret': 'Consumer Secret',
+  'settings.epoHint': '欧州特許庁のOPS APIキー。公知例調査で使用します。未設定の場合はGoogle Patentsによるフォールバック検索を行います。',
 } as const
 
 export default ja

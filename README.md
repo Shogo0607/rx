@@ -76,6 +76,26 @@ npm run dev
 
 > **カスタムエンドポイント**: OpenAI 互換の API (Azure OpenAI, ローカル LLM サーバー等) を使用する場合は、「Base URL」に独自のエンドポイントを設定してください。
 
+### EPO OPS API キーの設定（任意）
+
+Patent Studio の公知例調査で EPO (欧州特許庁) の特許データベースを検索するには、EPO OPS API の Consumer Key / Consumer Secret が必要です。未設定の場合は Google Patents によるフォールバック検索で動作します。
+
+#### API キーの取得手順
+
+1. [EPO Open Patent Services](https://developers.epo.org/) にアクセスします
+2. 「**MyEPO Portfolio**」からアカウントを作成します（無料）
+3. ログイン後、「**My Apps**」ページで新しいアプリケーションを登録します
+4. 登録完了後、**Consumer Key** と **Consumer Secret** が発行されます
+
+#### アプリへの設定
+
+1. アプリケーションのヘッダー右側の**設定** (歯車アイコン) をクリックします
+2. 「EPO OPS（特許検索API）」セクションまでスクロールします
+3. 取得した **Consumer Key** と **Consumer Secret** を入力します
+4. 「保存」をクリックします
+
+> **利用制限**: EPO OPS の無料プランでは、週あたりのリクエスト数に上限があります（個人利用は週 3.5GB のデータ転送量まで）。詳細は [EPO OPS のドキュメント](https://developers.epo.org/ops-v3-2/getting-started) を参照してください。
+
 ---
 
 ## スキル一覧

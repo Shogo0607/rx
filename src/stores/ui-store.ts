@@ -6,6 +6,7 @@ interface UiState {
   commandPaletteOpen: boolean
   sidebarCollapsed: boolean
   settingsDialogOpen: boolean
+  defaultModel: string
 
   setActiveSkill: (id: string) => void
   toggleChatPanel: () => void
@@ -14,6 +15,7 @@ interface UiState {
   setCommandPaletteOpen: (open: boolean) => void
   toggleSidebar: () => void
   setSettingsDialogOpen: (open: boolean) => void
+  setDefaultModel: (model: string) => void
 }
 
 export const useUiStore = create<UiState>((set) => ({
@@ -22,6 +24,7 @@ export const useUiStore = create<UiState>((set) => ({
   commandPaletteOpen: false,
   sidebarCollapsed: false,
   settingsDialogOpen: false,
+  defaultModel: 'gpt-4o',
 
   setActiveSkill: (id) => set({ activeSkillId: id }),
   toggleChatPanel: () => set((s) => ({ chatPanelOpen: !s.chatPanelOpen })),
@@ -29,5 +32,6 @@ export const useUiStore = create<UiState>((set) => ({
   toggleCommandPalette: () => set((s) => ({ commandPaletteOpen: !s.commandPaletteOpen })),
   setCommandPaletteOpen: (open) => set({ commandPaletteOpen: open }),
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
-  setSettingsDialogOpen: (open) => set({ settingsDialogOpen: open })
+  setSettingsDialogOpen: (open) => set({ settingsDialogOpen: open }),
+  setDefaultModel: (model) => set({ defaultModel: model || 'gpt-4o' })
 }))
