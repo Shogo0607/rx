@@ -79,6 +79,102 @@ interface OAuthToken {
   expiresAt: number
 }
 
+interface HttpRequestOptions {
+  url: string
+  method?: 'GET' | 'POST'
+  headers?: Record<string, string>
+  body?: string
+}
+
+interface HttpResponse {
+  ok: boolean
+  status: number
+  statusText: string
+  json: () => Promise<unknown>
+  text: () => Promise<string>
+}
+
+/**
+ * Make an HTTPS request using node:https with proxy support and
+ * rejectUnauthorized: false (for corporate proxy / MITM environments).
+ * Replaces global fetch() which does not honour HTTP_PROXY and enforces
+ * strict TLS, causing "TypeError: fetch failed" behind proxies.
+ */
+function httpsRequest(opts: HttpRequestOptions): Promise<HttpResponse> {
+  const target = new URL(opts.url)
+  const proxyUrl = getProxyUrl()
+
+  const makeRequest = (socket?: import('node:net').Socket): Promise<HttpResponse> => {
+    return new Promise((resolve, reject) => {
+      const requestOptions: https.RequestOptions = {
+        hostname: target.hostname,
+        port: target.port || 443,
+        path: target.pathname + target.search,
+        method: opts.method || 'GET',
+        headers: opts.headers || {},
+        rejectUnauthorized: false,
+        timeout: 30000,
+        ...(socket ? { socket, agent: false } : {})
+      }
+
+      const req = https.request(requestOptions, (res) => {
+        const chunks: Buffer[] = []
+        res.on('data', (chunk: Buffer) => chunks.push(chunk))
+        res.on('end', () => {
+          const bodyStr = Buffer.concat(chunks).toString('utf-8')
+          resolve({
+            ok: (res.statusCode || 0) >= 200 && (res.statusCode || 0) < 300,
+            status: res.statusCode || 0,
+            statusText: res.statusMessage || '',
+            json: () => Promise.resolve(JSON.parse(bodyStr)),
+            text: () => Promise.resolve(bodyStr)
+          })
+        })
+        res.on('error', reject)
+      })
+
+      req.on('error', reject)
+      req.on('timeout', () => { req.destroy(); reject(new Error('Request timeout')) })
+
+      if (opts.body) req.write(opts.body)
+      req.end()
+    })
+  }
+
+  if (proxyUrl) {
+    const proxy = new URL(proxyUrl)
+    const targetPort = parseInt(target.port || '443', 10)
+
+    return new Promise((resolve, reject) => {
+      const connectReq = http.request({
+        host: proxy.hostname,
+        port: parseInt(proxy.port || '8080', 10),
+        method: 'CONNECT',
+        path: `${target.hostname}:${targetPort}`,
+        timeout: 15000
+      })
+
+      connectReq.on('connect', (_res, socket) => {
+        const tlsSocket = tls.connect({
+          socket,
+          host: target.hostname,
+          servername: target.hostname,
+          rejectUnauthorized: false
+        }, () => {
+          makeRequest(tlsSocket as unknown as import('node:net').Socket).then(resolve, reject)
+        })
+        tlsSocket.on('error', reject)
+      })
+
+      connectReq.on('error', reject)
+      connectReq.on('timeout', () => { connectReq.destroy(); reject(new Error('Proxy CONNECT timeout')) })
+      connectReq.end()
+    })
+  }
+
+  return makeRequest()
+}
+
 export class PatentSearchApiService {
   private epoLimiter = new RateLimiter(3) // EPO OPS: ~3 req/s reasonable
   private usptoLimiter = new RateLimiter(5)
@@ -104,7 +200,8 @@ export class PatentSearchApiService {
 
     const credentials = Buffer.from(`${this.consumerKey}:${this.consumerSecret}`).toString('base64')
 
-    const response = await fetch('https://ops.epo.org/3.2/auth/accesstoken', {
+    const response = await httpsRequest({
+      url: 'https://ops.epo.org/3.2/auth/accesstoken',
       method: 'POST',
       headers: {
         'Authorization': `Basic ${credentials}`,
@@ -151,15 +248,13 @@ export class PatentSearchApiService {
     const rangeEnd = offset + limit - 1
     const encodedQuery = encodeURIComponent(cql)
 
-    const response = await fetch(
-      `https://ops.epo.org/3.2/rest-services/published-data/search?q=${encodedQuery}&Range=${offset}-${rangeEnd}`,
-      {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Accept': 'application/json'
-        }
+    const response = await httpsRequest({
+      url: `https://ops.epo.org/3.2/rest-services/published-data/search?q=${encodedQuery}&Range=${offset}-${rangeEnd}`,
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'application/json'
       }
-    )
+    })
 
     if (!response.ok) {
       if (response.status === 404) {
@@ -317,15 +412,13 @@ export class PatentSearchApiService {
 
     const token = await this.getEpoAccessToken()
 
-    const response = await fetch(
-      `https://ops.epo.org/3.2/rest-services/published-data/publication/docdb/${patentNumber}/biblio,abstract`,
-      {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Accept': 'application/json'
-        }
+    const response = await httpsRequest({
+      url: `https://ops.epo.org/3.2/rest-services/published-data/publication/docdb/${patentNumber}/biblio,abstract`,
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'application/json'
       }
-    )
+    })
 
     if (!response.ok) {
       if (response.status === 404) return null
@@ -369,15 +462,13 @@ export class PatentSearchApiService {
 
     const token = await this.getEpoAccessToken()
 
-    const response = await fetch(
-      `https://ops.epo.org/3.2/rest-services/family/publication/docdb/${patentNumber}`,
-      {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Accept': 'application/json'
-        }
+    const response = await httpsRequest({
+      url: `https://ops.epo.org/3.2/rest-services/family/publication/docdb/${patentNumber}`,
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'application/json'
       }
-    )
+    })
 
     if (!response.ok) {
       if (response.status === 404) return null
@@ -443,7 +534,8 @@ export class PatentSearchApiService {
       o: { size, from }
     }
 
-    const response = await fetch('https://search.patentsview.org/api/v1/patent/', {
+    const response = await httpsRequest({
+      url: 'https://search.patentsview.org/api/v1/patent/',
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
