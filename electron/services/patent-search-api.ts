@@ -266,24 +266,51 @@ export class PatentSearchApiService {
     const offset = options.offset || 1
 
     // Build CQL query for EPO OPS (GET only — POST returns 415)
-    // If query has no CQL field codes, wrap keywords in ta= (title+abstract)
     console.log(`[patent-search] EPO raw query: ${query}`)
-    let cql = query
-    const hasCqlField = /\b(ti|ta|ab|cl|txt|pa|in|pn|pd|ic)\s*=/.test(cql)
-    if (!hasCqlField) {
-      // Extract meaningful keywords (ASCII only, skip short words)
-      const keywords = cql
-        .replace(/[^\x20-\x7E]/g, ' ') // Strip non-ASCII (Japanese etc.)
-        .replace(/[^\w\s-]/g, ' ')
-        .split(/\s+/)
-        .filter((w) => w.length >= 3 && !/^(and|or|not|the|for|with|from|that|this|are|was|has|have|been)$/i.test(w))
-        .slice(0, 5) // Max 5 keywords to keep URL short
-      if (keywords.length === 0) {
-        console.warn('[patent-search] EPO: no usable keywords extracted from query')
-        return { patents: [], total: 0 }
+    const keywords = this.extractEpoKeywords(query)
+    const cqlBase = this.buildEpoCql(query, keywords, options)
+
+    const rangeEnd = offset + limit - 1
+
+    // Try search; if 404, broaden with txt (full-text) field
+    const strategies = [cqlBase]
+    if (keywords.length > 0) {
+      // Broader fallbacks: fewer keywords, then full-text search
+      if (keywords.length > 3) {
+        strategies.push(this.buildEpoCql(query, keywords.slice(0, 3), options))
       }
-      // Use ta all "word1 word2 word3" — searches title+abstract for all words
-      cql = `ta all "${keywords.join(' ')}"`
+      strategies.push(`txt any "${keywords.slice(0, 4).join(' ')}"`)
+    }
+
+    for (const cql of strategies) {
+      const result = await this.executeEpoSearch(cql, token, offset, rangeEnd)
+      if (result) return result
+    }
+
+    console.log('[patent-search] EPO: all search strategies returned 0 results')
+    return { patents: [], total: 0 }
+  }
+
+  private extractEpoKeywords(query: string): string[] {
+    const stopWords = new Set(['and', 'or', 'not', 'the', 'for', 'with', 'from', 'that', 'this', 'are', 'was', 'has', 'have', 'been', 'using', 'based', 'method', 'system', 'device', 'apparatus'])
+    return query
+      .replace(/[^\x20-\x7E]/g, ' ') // Strip non-ASCII
+      .replace(/[^\w\s-]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length >= 3 && !stopWords.has(w.toLowerCase()))
+      .slice(0, 8)
+  }
+
+  private buildEpoCql(query: string, keywords: string[], options: PatentSearchOptions): string {
+    const hasCqlField = /\b(ti|ta|ab|cl|txt|pa|in|pn|pd|ic)\s*=/.test(query)
+    let cql: string
+    if (hasCqlField) {
+      cql = query
+    } else if (keywords.length === 0) {
+      cql = ''
+    } else {
+      // "ta any" matches documents containing ANY of the keywords in title+abstract
+      cql = `ta any "${keywords.join(' ')}"`
     }
     if (options.jurisdiction) {
       cql += ` AND pn=${options.jurisdiction}`
@@ -294,21 +321,24 @@ export class PatentSearchApiService {
     if (options.dateTo) {
       cql += ` AND pd<=${options.dateTo.replace(/-/g, '')}`
     }
-
-    // Truncate if encoded query is too long for URL (max ~1800 chars total)
+    // Truncate if encoded query is too long for URL
     while (encodeURIComponent(cql).length > 1400) {
-      // Remove last AND clause
       const lastAnd = cql.lastIndexOf(' AND ')
       if (lastAnd <= 0) break
       cql = cql.slice(0, lastAnd)
     }
+    return cql
+  }
 
-    const rangeEnd = offset + limit - 1
+  private async executeEpoSearch(cql: string, token: string, offset: number, rangeEnd: number): Promise<PatentSearchResponse | null> {
+    if (!cql) return null
+
+    await this.epoLimiter.wait()
+
     const encodedQuery = encodeURIComponent(cql)
     const searchUrl = `https://ops.epo.org/3.2/rest-services/published-data/search?q=${encodedQuery}&Range=${offset}-${rangeEnd}`
 
     console.log(`[patent-search] EPO search CQL: ${cql}`)
-    console.log(`[patent-search] EPO search URL length: ${searchUrl.length}`)
 
     const response = await httpsRequest({
       url: searchUrl,
@@ -320,21 +350,21 @@ export class PatentSearchApiService {
 
     console.log(`[patent-search] EPO search response: ${response.status} ${response.statusText}`)
 
+    if (response.status === 404) {
+      console.log(`[patent-search] EPO 404 — no results for: ${cql}`)
+      return null // Signal caller to try next strategy
+    }
+
     if (!response.ok) {
-      if (response.status === 404) {
-        const body404 = await response.text()
-        console.log(`[patent-search] EPO 404 (no results or invalid CQL): ${body404.slice(0, 300)}`)
-        return { patents: [], total: 0 }
-      }
       if (response.status === 429) {
         throw new Error('EPO OPS rate limit exceeded. Please wait a moment.')
       }
       if (response.status === 403) {
-        this.oauthToken = null // Token may have expired
+        this.oauthToken = null
         throw new Error('EPO OPS access forbidden. Token may have expired, please retry.')
       }
       const errorBody = await response.text()
-      console.warn(`[patent-search] EPO error body: ${errorBody.slice(0, 500)}`)
+      console.warn(`[patent-search] EPO error ${response.status}: ${errorBody.slice(0, 300)}`)
       throw new Error(`EPO OPS API error: ${response.status} ${response.statusText}`)
     }
 
