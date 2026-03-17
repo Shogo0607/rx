@@ -104,6 +104,13 @@ function httpsRequest(opts: HttpRequestOptions): Promise<HttpResponse> {
   const target = new URL(opts.url)
   const proxyUrl = getProxyUrl()
 
+  // Ensure Content-Length is set for POST bodies to avoid chunked encoding,
+  // which some servers (e.g. EPO OPS) reject with 415.
+  const headers: Record<string, string> = { ...(opts.headers || {}) }
+  if (opts.body && !headers['Content-Length']) {
+    headers['Content-Length'] = String(Buffer.byteLength(opts.body, 'utf-8'))
+  }
+
   const handleResponse = (res: import('node:http').IncomingMessage): Promise<HttpResponse> => {
     return new Promise((resolve, reject) => {
       const chunks: Buffer[] = []
@@ -130,7 +137,7 @@ function httpsRequest(opts: HttpRequestOptions): Promise<HttpResponse> {
         port: target.port || 443,
         path: target.pathname + target.search,
         method: opts.method || 'GET',
-        headers: opts.headers || {},
+        headers,
         rejectUnauthorized: false,
         timeout: 30000
       }, (res) => { handleResponse(res).then(resolve, reject) })
@@ -153,7 +160,7 @@ function httpsRequest(opts: HttpRequestOptions): Promise<HttpResponse> {
         port: target.port || 443,
         path: target.pathname + target.search,
         method: opts.method || 'GET',
-        headers: opts.headers || {},
+        headers,
         timeout: 30000,
         createConnection: () => tlsSocket
       }, (res) => { handleResponse(res).then(resolve, reject) })
