@@ -271,14 +271,16 @@ export class PatentSearchApiService {
     }
 
     const rangeEnd = offset + limit - 1
-    const encodedQuery = encodeURIComponent(cql)
 
     const response = await httpsRequest({
-      url: `https://ops.epo.org/3.2/rest-services/published-data/search?q=${encodedQuery}&Range=${offset}-${rangeEnd}`,
+      url: 'https://ops.epo.org/3.2/rest-services/published-data/search',
+      method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,
-        'Accept': 'application/json'
-      }
+        'Accept': 'application/json',
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: `q=${encodeURIComponent(cql)}&Range=${offset}-${rangeEnd}`
     })
 
     if (!response.ok) {
