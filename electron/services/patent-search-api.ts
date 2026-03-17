@@ -267,16 +267,23 @@ export class PatentSearchApiService {
 
     // Build CQL query for EPO OPS (GET only — POST returns 415)
     // If query has no CQL field codes, wrap keywords in ta= (title+abstract)
+    console.log(`[patent-search] EPO raw query: ${query}`)
     let cql = query
     const hasCqlField = /\b(ti|ta|ab|cl|txt|pa|in|pn|pd|ic)\s*=/.test(cql)
     if (!hasCqlField) {
-      // Extract English keywords, join with AND in ta= field
+      // Extract meaningful keywords (ASCII only, skip short words)
       const keywords = cql
-        .replace(/[^\w\s]/g, ' ')
+        .replace(/[^\x20-\x7E]/g, ' ') // Strip non-ASCII (Japanese etc.)
+        .replace(/[^\w\s-]/g, ' ')
         .split(/\s+/)
-        .filter((w) => w.length >= 2)
-        .slice(0, 6) // Max 6 keywords to keep URL short
-      cql = keywords.map((k) => `ta="${k}"`).join(' AND ')
+        .filter((w) => w.length >= 3 && !/^(and|or|not|the|for|with|from|that|this|are|was|has|have|been)$/i.test(w))
+        .slice(0, 5) // Max 5 keywords to keep URL short
+      if (keywords.length === 0) {
+        console.warn('[patent-search] EPO: no usable keywords extracted from query')
+        return { patents: [], total: 0 }
+      }
+      // Use ta all "word1 word2 word3" — searches title+abstract for all words
+      cql = `ta all "${keywords.join(' ')}"`
     }
     if (options.jurisdiction) {
       cql += ` AND pn=${options.jurisdiction}`
@@ -315,6 +322,8 @@ export class PatentSearchApiService {
 
     if (!response.ok) {
       if (response.status === 404) {
+        const body404 = await response.text()
+        console.log(`[patent-search] EPO 404 (no results or invalid CQL): ${body404.slice(0, 300)}`)
         return { patents: [], total: 0 }
       }
       if (response.status === 429) {
