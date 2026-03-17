@@ -259,7 +259,8 @@ export class PatentSearchApiService {
     const offset = options.offset || 1
 
     // Build CQL query for EPO OPS
-    let cql = query
+    // Truncate base query to avoid 413 — EPO OPS URL limit is ~2000 chars
+    let cql = query.length > 500 ? query.slice(0, 500).replace(/\s\S*$/, '') : query
     if (options.jurisdiction) {
       cql += ` AND pn=${options.jurisdiction}`
     }
@@ -271,16 +272,16 @@ export class PatentSearchApiService {
     }
 
     const rangeEnd = offset + limit - 1
+    const encodedQuery = encodeURIComponent(cql)
 
+    // EPO OPS search is GET-only; Range is an HTTP header
     const response = await httpsRequest({
-      url: 'https://ops.epo.org/3.2/rest-services/published-data/search',
-      method: 'POST',
+      url: `https://ops.epo.org/3.2/rest-services/published-data/search?q=${encodedQuery}`,
       headers: {
         'Authorization': `Bearer ${token}`,
         'Accept': 'application/json',
-        'Content-Type': 'application/x-www-form-urlencoded'
-      },
-      body: `q=${encodeURIComponent(cql)}&Range=${offset}-${rangeEnd}`
+        'Range': `${offset}-${rangeEnd}`
+      }
     })
 
     if (!response.ok) {
