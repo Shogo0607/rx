@@ -104,34 +104,59 @@ function httpsRequest(opts: HttpRequestOptions): Promise<HttpResponse> {
   const target = new URL(opts.url)
   const proxyUrl = getProxyUrl()
 
-  const makeRequest = (socket?: import('node:net').Socket): Promise<HttpResponse> => {
+  const handleResponse = (res: import('node:http').IncomingMessage): Promise<HttpResponse> => {
     return new Promise((resolve, reject) => {
-      const requestOptions: https.RequestOptions = {
+      const chunks: Buffer[] = []
+      res.on('data', (chunk: Buffer) => chunks.push(chunk))
+      res.on('end', () => {
+        const bodyStr = Buffer.concat(chunks).toString('utf-8')
+        resolve({
+          ok: (res.statusCode || 0) >= 200 && (res.statusCode || 0) < 300,
+          status: res.statusCode || 0,
+          statusText: res.statusMessage || '',
+          json: () => Promise.resolve(JSON.parse(bodyStr)),
+          text: () => Promise.resolve(bodyStr)
+        })
+      })
+      res.on('error', reject)
+    })
+  }
+
+  // Direct HTTPS request (no proxy)
+  const makeDirectRequest = (): Promise<HttpResponse> => {
+    return new Promise((resolve, reject) => {
+      const req = https.request({
         hostname: target.hostname,
         port: target.port || 443,
         path: target.pathname + target.search,
         method: opts.method || 'GET',
         headers: opts.headers || {},
         rejectUnauthorized: false,
-        timeout: 30000,
-        ...(socket ? { socket, agent: false } : {})
-      }
+        timeout: 30000
+      }, (res) => { handleResponse(res).then(resolve, reject) })
 
-      const req = https.request(requestOptions, (res) => {
-        const chunks: Buffer[] = []
-        res.on('data', (chunk: Buffer) => chunks.push(chunk))
-        res.on('end', () => {
-          const bodyStr = Buffer.concat(chunks).toString('utf-8')
-          resolve({
-            ok: (res.statusCode || 0) >= 200 && (res.statusCode || 0) < 300,
-            status: res.statusCode || 0,
-            statusText: res.statusMessage || '',
-            json: () => Promise.resolve(JSON.parse(bodyStr)),
-            text: () => Promise.resolve(bodyStr)
-          })
-        })
-        res.on('error', reject)
-      })
+      req.on('error', reject)
+      req.on('timeout', () => { req.destroy(); reject(new Error('Request timeout')) })
+
+      if (opts.body) req.write(opts.body)
+      req.end()
+    })
+  }
+
+  // Request over an already-TLS socket (via proxy tunnel).
+  // Use http.request — TLS is already handled by tls.connect, so
+  // https.request would double-wrap and cause "wrong version number".
+  const makeTunneledRequest = (tlsSocket: import('node:net').Socket): Promise<HttpResponse> => {
+    return new Promise((resolve, reject) => {
+      const req = http.request({
+        hostname: target.hostname,
+        port: target.port || 443,
+        path: target.pathname + target.search,
+        method: opts.method || 'GET',
+        headers: opts.headers || {},
+        timeout: 30000,
+        createConnection: () => tlsSocket
+      }, (res) => { handleResponse(res).then(resolve, reject) })
 
       req.on('error', reject)
       req.on('timeout', () => { req.destroy(); reject(new Error('Request timeout')) })
@@ -161,7 +186,7 @@ function httpsRequest(opts: HttpRequestOptions): Promise<HttpResponse> {
           servername: target.hostname,
           rejectUnauthorized: false
         }, () => {
-          makeRequest(tlsSocket as unknown as import('node:net').Socket).then(resolve, reject)
+          makeTunneledRequest(tlsSocket as unknown as import('node:net').Socket).then(resolve, reject)
         })
         tlsSocket.on('error', reject)
       })
@@ -172,7 +197,7 @@ function httpsRequest(opts: HttpRequestOptions): Promise<HttpResponse> {
     })
   }
 
-  return makeRequest()
+  return makeDirectRequest()
 }
 
 export class PatentSearchApiService {
