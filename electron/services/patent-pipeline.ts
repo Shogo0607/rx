@@ -401,27 +401,29 @@ Write ONLY the content for the "${section}" section. Do not include the section 
 
     if (hasAuth) {
       // ── Auth mode: Use EPO OPS / USPTO APIs ──
-      const jurisdictionHint = run.jurisdiction === 'JP'
-        ? 'Focus on Japanese patent terminology. Generate queries using both Japanese technical terms and their English equivalents that would appear in Japanese patent documents indexed by EPO.'
-        : run.jurisdiction === 'US'
-          ? 'Focus on US patent terminology and English technical terms.'
-          : 'Generate queries in both English and Japanese technical terms.'
-
       const queryResult = await llmService.structuredOutput({
-        prompt: `Analyze the following invention description and generate 3-5 patent search queries for the EPO OPS API (CQL syntax).
+        prompt: `Analyze the following invention description and generate 3-5 patent search queries.
 
-IMPORTANT query format rules:
-- Each query must be SHORT: 3-8 English keywords/phrases only
-- Use EPO CQL field codes: ti= (title), ta= (title+abstract), ab= (abstract), cl= (claims), txt= (full text)
-- Combine terms with AND/OR, e.g.: ta="solar cell" AND ta="perovskite" AND ta="tandem"
-- Do NOT write long sentences or descriptions — only concise keyword-based CQL queries
-- All queries must be in English (EPO indexes English abstracts for all jurisdictions)
+CRITICAL RULES:
+- Every query MUST be in English only — no Japanese, no CJK characters
+- Each query is 3-6 English technical keywords separated by spaces
+- Do NOT use CQL syntax, field codes, quotes, or operators (no ta=, no AND/OR)
+- Do NOT write sentences — only bare keywords
+- Focus on the core technical concepts of the invention
 
-Target jurisdiction: ${jurisdictionLabel}
+Good examples:
+  "perovskite tandem solar cell efficiency"
+  "lithium solid electrolyte interface"
+  "transformer attention mechanism pruning"
+
+Bad examples (DO NOT DO):
+  "ta=\\"solar cell\\" AND ta=\\"perovskite\\"" (no CQL syntax)
+  "太陽電池 ペロブスカイト" (no Japanese)
+  "A method for improving solar cell efficiency using perovskite" (no sentences)
 
 Invention Description:
 ${run.inventionDescription}`,
-        systemPrompt: `You are a patent search expert specializing in EPO OPS CQL queries. ${jurisdictionHint} Always output short keyword-based CQL queries, never long natural language sentences.`,
+        systemPrompt: 'You are a patent search expert. Output ONLY bare English technical keywords for each query. No CQL, no Japanese, no sentences.',
         schema: {
           type: 'object',
           properties: {
@@ -447,7 +449,10 @@ ${run.inventionDescription}`,
       searchQueries = queryResult.queries
       this.sendProgress(window, runId, 1, 'researching', { phase: 'searching', queriesGenerated: queryResult.queries.length })
 
-      const searchOptions = { limit: 10, jurisdiction: run.jurisdiction !== 'all' ? run.jurisdiction : undefined }
+      // Don't pass jurisdiction to CQL — it adds pn=XX which is too restrictive
+      // when combined with English keyword search. The pipeline routing already
+      // selects the right API (EPO for JP, USPTO for US).
+      const searchOptions = { limit: 10 }
 
       for (const q of queryResult.queries) {
         try {

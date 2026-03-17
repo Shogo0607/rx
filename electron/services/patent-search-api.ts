@@ -268,19 +268,24 @@ export class PatentSearchApiService {
     // Build CQL query for EPO OPS (GET only — POST returns 415)
     console.log(`[patent-search] EPO raw query: ${query}`)
     const keywords = this.extractEpoKeywords(query)
-    const cqlBase = this.buildEpoCql(query, keywords, options)
+    console.log(`[patent-search] EPO extracted keywords: ${JSON.stringify(keywords)}`)
+
+    if (keywords.length === 0) {
+      console.warn('[patent-search] EPO: no usable English keywords — skipping')
+      return { patents: [], total: 0 }
+    }
 
     const rangeEnd = offset + limit - 1
 
-    // Try search; if 404, broaden with txt (full-text) field
-    const strategies = [cqlBase]
-    if (keywords.length > 0) {
-      // Broader fallbacks: fewer keywords, then full-text search
-      if (keywords.length > 3) {
-        strategies.push(this.buildEpoCql(query, keywords.slice(0, 3), options))
-      }
-      strategies.push(`txt any "${keywords.slice(0, 4).join(' ')}"`)
-    }
+    // Progressively broaden search until results are found:
+    // 1) ta any with all keywords (title+abstract, any match)
+    // 2) ta any with top 3 keywords (fewer = broader)
+    // 3) txt any with top 3 keywords (full-text = broadest)
+    const strategies = [
+      this.buildEpoCql(keywords, options),
+      ...(keywords.length > 3 ? [this.buildEpoCql(keywords.slice(0, 3), options)] : []),
+      `txt any "${keywords.slice(0, 3).join(' ')}"`,
+    ]
 
     for (const cql of strategies) {
       const result = await this.executeEpoSearch(cql, token, offset, rangeEnd)
@@ -292,29 +297,22 @@ export class PatentSearchApiService {
   }
 
   private extractEpoKeywords(query: string): string[] {
-    const stopWords = new Set(['and', 'or', 'not', 'the', 'for', 'with', 'from', 'that', 'this', 'are', 'was', 'has', 'have', 'been', 'using', 'based', 'method', 'system', 'device', 'apparatus'])
+    const stopWords = new Set(['and', 'or', 'not', 'the', 'for', 'with', 'from', 'that', 'this', 'are', 'was', 'has', 'have', 'been', 'using', 'based', 'method', 'system', 'device', 'apparatus', 'comprising', 'wherein', 'provided', 'includes', 'including'])
     return query
-      .replace(/[^\x20-\x7E]/g, ' ') // Strip non-ASCII
+      .replace(/[^\x20-\x7E]/g, ' ')       // Strip non-ASCII (Japanese etc.)
+      .replace(/\b(ta|ti|ab|cl|txt|pa|in|pn|pd|ic)\s*[=]/g, ' ') // Strip CQL field codes
+      .replace(/\b(AND|OR|NOT)\b/gi, ' ')   // Strip CQL operators
+      .replace(/["']/g, ' ')               // Strip quotes
       .replace(/[^\w\s-]/g, ' ')
       .split(/\s+/)
       .filter((w) => w.length >= 3 && !stopWords.has(w.toLowerCase()))
       .slice(0, 8)
   }
 
-  private buildEpoCql(query: string, keywords: string[], options: PatentSearchOptions): string {
-    const hasCqlField = /\b(ti|ta|ab|cl|txt|pa|in|pn|pd|ic)\s*=/.test(query)
-    let cql: string
-    if (hasCqlField) {
-      cql = query
-    } else if (keywords.length === 0) {
-      cql = ''
-    } else {
-      // "ta any" matches documents containing ANY of the keywords in title+abstract
-      cql = `ta any "${keywords.join(' ')}"`
-    }
-    if (options.jurisdiction) {
-      cql += ` AND pn=${options.jurisdiction}`
-    }
+  private buildEpoCql(keywords: string[], options: PatentSearchOptions): string {
+    if (keywords.length === 0) return ''
+    // "ta any" matches documents containing ANY of the keywords in title+abstract
+    let cql = `ta any "${keywords.join(' ')}"`
     if (options.dateFrom) {
       cql += ` AND pd>=${options.dateFrom.replace(/-/g, '')}`
     }
