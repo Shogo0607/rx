@@ -730,53 +730,6 @@ export class PatentSearchApiService {
   }
 
   /**
-   * Search Google Patents by keywords and return patent numbers found in results.
-   * Scrapes the search results page — no authentication required.
-   */
-  async searchGooglePatents(query: string, options: { limit?: number; jurisdiction?: string } = {}): Promise<PatentSearchResult[]> {
-    await this.googleLimiter.wait()
-
-    const limit = options.limit || 10
-    const encodedQuery = encodeURIComponent(query)
-    // Build Google Patents search URL with optional country filter
-    let searchUrl = `https://patents.google.com/?q=${encodedQuery}&num=${limit}`
-    if (options.jurisdiction) {
-      searchUrl += `&country=${options.jurisdiction}`
-    }
-
-    try {
-      const html = await this.fetchHtmlWithProxy(searchUrl)
-      if (!html) return []
-
-      // Extract patent numbers from search result links
-      // Google Patents uses links like /patent/US10123456B2/ or /patent/JP2020123456A/
-      const patentRegex = /\/patent\/([A-Z]{2}\d[\w]+)\b/g
-      const foundNumbers = new Set<string>()
-      let match: RegExpExecArray | null
-      while ((match = patentRegex.exec(html)) !== null) {
-        foundNumbers.add(match[1])
-      }
-
-      // Fetch details for each found patent
-      const patents: PatentSearchResult[] = []
-      for (const pn of [...foundNumbers].slice(0, limit)) {
-        try {
-          const detail = await this.fetchPatentFromGoogle(pn)
-          if (detail) patents.push(detail)
-        } catch {
-          // Skip individual fetch failures
-        }
-      }
-
-      console.log(`[patent-search] Google Patents search found: ${patents.length} patents for query: ${query}`)
-      return patents
-    } catch (err) {
-      console.warn(`[patent-search] Google Patents search failed: ${err}`)
-      return []
-    }
-  }
-
-  /**
    * Fetch individual patent data from Google Patents (no auth required).
    * Parses HTML meta tags for bibliographic data.
    *

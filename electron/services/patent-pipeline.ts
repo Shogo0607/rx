@@ -587,28 +587,34 @@ ${run.inventionDescription}`,
         }
       }
     } else {
-      // ── No-auth mode: Use same claim-decomposition query → search Google Patents ──
-      this.sendProgress(window, runId, 1, 'researching', { phase: 'searching', mode: 'no-auth' })
+      // ── No-auth mode: LLM identifies patents per technical element → verify via Google Patents ──
+      this.sendProgress(window, runId, 1, 'researching', { phase: 'identifying', mode: 'no-auth' })
 
-      // Use the same claim-decomposition prompt as auth mode for query generation
-      const queryResult = await llmService.structuredOutput({
-        prompt: `You are a patent examiner conducting a novelty search. Decompose the following invention into 3-5 distinct technical elements, then generate a focused search query for each element.
+      const jurisdictionInstruction = run.jurisdiction === 'JP'
+        ? 'Focus exclusively on Japanese patent publications. Use the format JP followed by the publication number and kind code (e.g., JP2020123456A, JP6789012B2, JPH10123456A). Include both recent and older relevant patents.'
+        : run.jurisdiction === 'US'
+          ? 'Focus on US patent publications. Use the format US followed by the patent number (e.g., US10123456B2, US2020012345A1).'
+          : 'Include patents from all major jurisdictions (JP, US, EP, WO, CN, KR). Use standard patent number formats.'
+
+      // Use claim-decomposition approach: decompose into elements, then identify patents per element
+      const identifyResult = await llmService.structuredOutput({
+        prompt: `You are a patent examiner conducting a novelty search. First decompose the invention into 3-5 distinct technical elements, then identify 3-5 real patent numbers for EACH element.
+
+${jurisdictionInstruction}
 
 TASK:
-1. Identify the key technical elements that make this invention distinct
-2. For each element, generate a focused keyword query
-3. Generate one combined query using the most distinctive terms
+1. Decompose the invention into its key technical elements (structure, material, process, mechanism, etc.)
+2. For each element, identify 3-5 REAL patent publication numbers that are relevant prior art for that specific element
+3. Patents must actually exist — do not fabricate numbers
 
-CRITICAL RULES:
-- Every query MUST be in English only — no Japanese, no CJK characters
-- Each query is 3-8 English technical keywords separated by spaces
-- Do NOT use CQL syntax, field codes, quotes, or operators
-- Do NOT write sentences — only bare keywords
-- Think like a patent examiner: what specific terms distinguish this invention?
+IMPORTANT:
+- Each element should have its own set of patents targeting that specific aspect
+- Include the most relevant/closest prior art first within each element
+- For each patent, explain briefly why it is relevant to that element
 
 Invention Description:
 ${run.inventionDescription}`,
-        systemPrompt: 'You are a patent examiner conducting a prior art novelty search. Decompose the invention into distinct technical elements and generate precise search queries. Output ONLY bare English technical keywords.',
+        systemPrompt: 'You are a patent examiner with deep knowledge of patent databases. Decompose the invention into technical elements and identify real, existing patent numbers for each element. Prioritize accuracy of patent numbers.',
         schema: {
           type: 'object',
           properties: {
@@ -618,39 +624,54 @@ ${run.inventionDescription}`,
                 type: 'object',
                 properties: {
                   element: { type: 'string' },
-                  query: { type: 'string' }
+                  patents: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        patentNumber: { type: 'string' },
+                        expectedTitle: { type: 'string' },
+                        relevanceReason: { type: 'string' }
+                      },
+                      required: ['patentNumber', 'expectedTitle', 'relevanceReason'],
+                      additionalProperties: false
+                    }
+                  }
                 },
-                required: ['element', 'query'],
+                required: ['element', 'patents'],
                 additionalProperties: false
               }
-            },
-            combinedQuery: { type: 'string' }
+            }
           },
-          required: ['technicalElements', 'combinedQuery'],
+          required: ['technicalElements'],
           additionalProperties: false
         }
-      }) as { technicalElements: Array<{ element: string; query: string }>; combinedQuery: string }
+      }) as { technicalElements: Array<{ element: string; patents: Array<{ patentNumber: string; expectedTitle: string; relevanceReason: string }> }> }
 
-      searchQueries = [
-        ...queryResult.technicalElements.map(te => ({ query: te.query, aspect: te.element })),
-        { query: queryResult.combinedQuery, aspect: 'combined' }
-      ]
+      searchQueries = identifyResult.technicalElements.map(te => ({ query: te.element, aspect: te.element }))
+      const allIdentified = identifyResult.technicalElements.flatMap(te =>
+        te.patents.map(p => ({ ...p, aspect: te.element }))
+      )
+      this.sendProgress(window, runId, 1, 'researching', {
+        phase: 'verifying',
+        identified: allIdentified.length
+      })
 
-      // Search Google Patents for each query
-      for (const q of searchQueries) {
+      // Verify each patent via Google Patents (no auth)
+      for (const identified of allIdentified) {
         try {
-          const patents = await patentSearchApiService.searchGooglePatents(q.query, {
-            limit: 5,
-            jurisdiction: run.jurisdiction !== 'ALL' ? run.jurisdiction : undefined
-          })
-          allPatents.push(...patents)
-          this.sendProgress(window, runId, 1, 'researching', {
-            phase: 'searching',
-            query: q.query,
-            found: patents.length
-          })
+          const patent = await patentSearchApiService.fetchPatentFromGoogle(identified.patentNumber)
+          if (patent) {
+            allPatents.push(patent)
+            this.sendProgress(window, runId, 1, 'researching', {
+              phase: 'verifying',
+              verified: identified.patentNumber,
+              found: allPatents.length
+            })
+          }
+          // Skip unverified patents — do not save LLM-fabricated data
         } catch (err) {
-          console.warn(`[patent-pipeline] Google Patents search failed for query "${q.query}": ${err}`)
+          console.warn(`[patent-pipeline] Google Patents fetch failed for ${identified.patentNumber}: ${err}`)
         }
       }
     }
