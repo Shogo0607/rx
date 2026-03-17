@@ -408,12 +408,20 @@ Write ONLY the content for the "${section}" section. Do not include the section 
           : 'Generate queries in both English and Japanese technical terms.'
 
       const queryResult = await llmService.structuredOutput({
-        prompt: `Analyze the following invention description and generate 3-5 patent search queries that would find relevant prior art. The queries should cover different aspects of the invention. Use technical terms that would appear in patent documents.
+        prompt: `Analyze the following invention description and generate 3-5 patent search queries for the EPO OPS API (CQL syntax).
+
+IMPORTANT query format rules:
+- Each query must be SHORT: 3-8 English keywords/phrases only
+- Use EPO CQL field codes: ti= (title), ta= (title+abstract), ab= (abstract), cl= (claims), txt= (full text)
+- Combine terms with AND/OR, e.g.: ta="solar cell" AND ta="perovskite" AND ta="tandem"
+- Do NOT write long sentences or descriptions — only concise keyword-based CQL queries
+- All queries must be in English (EPO indexes English abstracts for all jurisdictions)
+
 Target jurisdiction: ${jurisdictionLabel}
 
 Invention Description:
 ${run.inventionDescription}`,
-        systemPrompt: `You are a patent search expert. ${jurisdictionHint}`,
+        systemPrompt: `You are a patent search expert specializing in EPO OPS CQL queries. ${jurisdictionHint} Always output short keyword-based CQL queries, never long natural language sentences.`,
         schema: {
           type: 'object',
           properties: {

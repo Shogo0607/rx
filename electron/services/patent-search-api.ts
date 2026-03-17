@@ -259,8 +259,16 @@ export class PatentSearchApiService {
     const offset = options.offset || 1
 
     // Build CQL query for EPO OPS
-    // Truncate base query to avoid 413 — EPO OPS URL limit is ~2000 chars
-    let cql = query.length > 500 ? query.slice(0, 500).replace(/\s\S*$/, '') : query
+    // Truncate query so the encoded URL stays under ~1800 chars.
+    // Japanese/CJK characters expand 3× in UTF-8 and 9× when percent-encoded,
+    // so we must check the encoded length, not the raw character count.
+    let cql = query
+    while (encodeURIComponent(cql).length > 1400) {
+      // Drop roughly the last word / token
+      const trimmed = cql.replace(/[\s\S]{1,20}$/, '')
+      if (trimmed === cql || trimmed.length === 0) { cql = cql.slice(0, Math.floor(cql.length / 2)); break }
+      cql = trimmed
+    }
     if (options.jurisdiction) {
       cql += ` AND pn=${options.jurisdiction}`
     }
