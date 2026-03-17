@@ -265,8 +265,19 @@ export class PatentSearchApiService {
     const limit = Math.min(options.limit || 25, 100)
     const offset = options.offset || 1
 
-    // Build CQL query for EPO OPS
+    // Build CQL query for EPO OPS (GET only — POST returns 415)
+    // If query has no CQL field codes, wrap keywords in ta= (title+abstract)
     let cql = query
+    const hasCqlField = /\b(ti|ta|ab|cl|txt|pa|in|pn|pd|ic)\s*=/.test(cql)
+    if (!hasCqlField) {
+      // Extract English keywords, join with AND in ta= field
+      const keywords = cql
+        .replace(/[^\w\s]/g, ' ')
+        .split(/\s+/)
+        .filter((w) => w.length >= 2)
+        .slice(0, 6) // Max 6 keywords to keep URL short
+      cql = keywords.map((k) => `ta="${k}"`).join(' AND ')
+    }
     if (options.jurisdiction) {
       cql += ` AND pn=${options.jurisdiction}`
     }
@@ -277,23 +288,27 @@ export class PatentSearchApiService {
       cql += ` AND pd<=${options.dateTo.replace(/-/g, '')}`
     }
 
-    const rangeEnd = offset + limit - 1
+    // Truncate if encoded query is too long for URL (max ~1800 chars total)
+    while (encodeURIComponent(cql).length > 1400) {
+      // Remove last AND clause
+      const lastAnd = cql.lastIndexOf(' AND ')
+      if (lastAnd <= 0) break
+      cql = cql.slice(0, lastAnd)
+    }
 
-    // Use POST to avoid URL length limits (413).
-    // Pagination uses X-OPS-Range header per EPO OPS specification.
-    // Ref: python-epo-ops-client, EPO OPS v3.2 docs
+    const rangeEnd = offset + limit - 1
+    const encodedQuery = encodeURIComponent(cql)
+    const searchUrl = `https://ops.epo.org/3.2/rest-services/published-data/search?q=${encodedQuery}&Range=${offset}-${rangeEnd}`
+
     console.log(`[patent-search] EPO search CQL: ${cql}`)
+    console.log(`[patent-search] EPO search URL length: ${searchUrl.length}`)
 
     const response = await httpsRequest({
-      url: 'https://ops.epo.org/3.2/rest-services/published-data/search',
-      method: 'POST',
+      url: searchUrl,
       headers: {
         'Authorization': `Bearer ${token}`,
-        'Accept': 'application/json',
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'X-OPS-Range': `${offset}-${rangeEnd}`
-      },
-      body: `q=${encodeURIComponent(cql)}`
+        'Accept': 'application/json'
+      }
     })
 
     console.log(`[patent-search] EPO search response: ${response.status} ${response.statusText}`)
