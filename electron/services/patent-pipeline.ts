@@ -402,59 +402,98 @@ Write ONLY the content for the "${section}" section. Do not include the section 
     if (hasAuth) {
       // ── Auth mode: Use EPO OPS / USPTO APIs ──
       const queryResult = await llmService.structuredOutput({
-        prompt: `Analyze the following invention description and generate 3-5 patent search queries.
+        prompt: `You are a patent examiner conducting a novelty search. Decompose the following invention into 3-5 distinct technical elements, then generate a focused search query for each element.
+
+TASK:
+1. Identify the key technical elements that make this invention distinct (e.g., structure, material, process, mechanism, application)
+2. For each element, generate a focused keyword query that a patent examiner would use
+3. For each element, suggest 1-3 IPC/CPC classification codes at subclass level or deeper
+4. Generate one combined query using the most distinctive terms across all elements
 
 CRITICAL RULES:
 - Every query MUST be in English only — no Japanese, no CJK characters
-- Each query is 3-6 English technical keywords separated by spaces
+- Each query is 3-8 English technical keywords separated by spaces
 - Do NOT use CQL syntax, field codes, quotes, or operators (no ta=, no AND/OR)
 - Do NOT write sentences — only bare keywords
-- Focus on the core technical concepts of the invention
+- Think like a patent examiner: what specific terms distinguish this invention from general prior art?
 
-Good examples:
-  "perovskite tandem solar cell efficiency"
-  "lithium solid electrolyte interface"
-  "transformer attention mechanism pruning"
+EXAMPLE 1:
+Invention: "A perovskite/silicon tandem solar cell with a self-assembled monolayer interlayer for improved charge transport"
+technicalElements:
+  - element: "Tandem cell architecture"
+    keywords: ["perovskite", "silicon", "tandem", "multi-junction", "solar cell"]
+    ipcCodes: ["H01L31/0687", "H10K30/50"]
+    query: "perovskite silicon tandem multi-junction solar cell"
+  - element: "Self-assembled monolayer interlayer"
+    keywords: ["self-assembled", "monolayer", "interlayer", "hole transport"]
+    ipcCodes: ["H10K30/80", "H10K85/00"]
+    query: "self-assembled monolayer interlayer hole transport photovoltaic"
+  - element: "Charge transport mechanism"
+    keywords: ["charge", "transport", "recombination", "interface", "passivation"]
+    ipcCodes: ["H01L31/068", "H10K30/40"]
+    query: "charge transport recombination interface passivation tandem cell"
+combinedQuery: "perovskite silicon tandem self-assembled monolayer charge transport"
 
-Bad examples (DO NOT DO):
-  "ta=\\"solar cell\\" AND ta=\\"perovskite\\"" (no CQL syntax)
-  "太陽電池 ペロブスカイト" (no Japanese)
-  "A method for improving solar cell efficiency using perovskite" (no sentences)
+EXAMPLE 2:
+Invention: "A machine learning method for predicting protein folding using graph neural networks with attention-based message passing"
+technicalElements:
+  - element: "Protein structure prediction"
+    keywords: ["protein", "folding", "structure", "prediction", "conformation"]
+    ipcCodes: ["G16B15/30", "G06N3/08"]
+    query: "protein folding structure prediction machine learning"
+  - element: "Graph neural network architecture"
+    keywords: ["graph", "neural network", "node", "edge", "molecular"]
+    ipcCodes: ["G06N3/045", "G06N3/04"]
+    query: "graph neural network molecular structure representation"
+  - element: "Attention-based message passing"
+    keywords: ["attention", "message passing", "aggregation", "transformer"]
+    ipcCodes: ["G06N3/0455", "G06F18/24"]
+    query: "attention mechanism message passing graph network aggregation"
+combinedQuery: "protein folding graph neural network attention message passing"
 
 Invention Description:
 ${run.inventionDescription}`,
-        systemPrompt: 'You are a patent search expert. Output ONLY bare English technical keywords for each query. No CQL, no Japanese, no sentences.',
+        systemPrompt: 'You are a patent examiner conducting a prior art novelty search. Decompose the invention into distinct technical elements and generate precise search queries for each. Include IPC/CPC classification codes. Output ONLY bare English technical keywords for queries. No CQL, no Japanese, no sentences.',
         schema: {
           type: 'object',
           properties: {
-            queries: {
+            technicalElements: {
               type: 'array',
               items: {
                 type: 'object',
                 properties: {
-                  query: { type: 'string' },
-                  aspect: { type: 'string' },
-                  language: { type: 'string' }
+                  element: { type: 'string' },
+                  keywords: { type: 'array', items: { type: 'string' } },
+                  ipcCodes: { type: 'array', items: { type: 'string' } },
+                  query: { type: 'string' }
                 },
-                required: ['query', 'aspect', 'language'],
+                required: ['element', 'keywords', 'ipcCodes', 'query'],
                 additionalProperties: false
               }
-            }
+            },
+            combinedQuery: { type: 'string' }
           },
-          required: ['queries'],
+          required: ['technicalElements', 'combinedQuery'],
           additionalProperties: false
         }
-      }) as { queries: Array<{ query: string; aspect: string; language: string }> }
+      }) as { technicalElements: Array<{ element: string; keywords: string[]; ipcCodes: string[]; query: string }>; combinedQuery: string }
 
-      searchQueries = queryResult.queries
-      this.sendProgress(window, runId, 1, 'researching', { phase: 'searching', queriesGenerated: queryResult.queries.length })
+      // Build search queries from technical elements + combined query
+      searchQueries = [
+        ...queryResult.technicalElements.map(te => ({ query: te.query, aspect: te.element, language: 'en' })),
+        { query: queryResult.combinedQuery, aspect: 'combined', language: 'en' }
+      ]
+
+      // Store IPC codes for classification-based search (Phase 3)
+      const ipcCodes = queryResult.technicalElements.flatMap(te => te.ipcCodes).filter(Boolean)
+      this.sendProgress(window, runId, 1, 'researching', { phase: 'searching', queriesGenerated: searchQueries.length })
 
       // Don't pass jurisdiction to CQL — it adds pn=XX which is too restrictive
       // when combined with English keyword search. The pipeline routing already
       // selects the right API (EPO for JP, USPTO for US).
       const searchOptions = { limit: 10 }
 
-      for (const q of queryResult.queries) {
+      for (const q of searchQueries) {
         try {
           let results: { patents: typeof allPatents; total: number }
 
@@ -488,104 +527,130 @@ ${run.inventionDescription}`,
           console.warn(`[patent-pipeline] Search failed for query "${q.query}": ${err}`)
         }
       }
+
+      // ── Phase 3B: Classification-based search using LLM-suggested IPC codes ──
+      if (ipcCodes.length > 0) {
+        const uniqueIpc = [...new Set(ipcCodes)]
+        // Use top 2 keywords from combined query for narrowing
+        const topKeywords = queryResult.combinedQuery.split(/\s+/).slice(0, 2).join(' ')
+        for (const ipc of uniqueIpc.slice(0, 4)) {
+          try {
+            // Truncate IPC to subclass for broader matching (e.g., H01L31/06 → H01L31)
+            const ipcTruncated = ipc.replace(/\/\d+$/, '')
+            const ipcCql = `ic="${ipcTruncated}" AND ta all "${topKeywords}"`
+            const result = await patentSearchApiService.executeEpoSearchPublic(ipcCql, searchOptions)
+            if (result) {
+              allPatents.push(...result.patents)
+              this.sendProgress(window, runId, 1, 'researching', {
+                phase: 'ipc-search',
+                ipc: ipcTruncated,
+                found: result.patents.length
+              })
+            }
+          } catch (err) {
+            console.warn(`[patent-pipeline] IPC search failed for "${ipc}": ${err}`)
+          }
+        }
+      }
+
+      // ── Phase 3C: Harvest classification codes from initial results ──
+      const harvestedCodes = new Map<string, number>()
+      for (const p of allPatents) {
+        if (p.classificationCodes) {
+          for (const code of p.classificationCodes) {
+            const subclass = code.replace(/\/\d+$/, '')
+            harvestedCodes.set(subclass, (harvestedCodes.get(subclass) || 0) + 1)
+          }
+        }
+      }
+      // Search using the most frequently appearing classification codes not already searched
+      const searchedIpc = new Set(ipcCodes.map(c => c.replace(/\/\d+$/, '')))
+      const topHarvestedCodes = [...harvestedCodes.entries()]
+        .filter(([code]) => !searchedIpc.has(code))
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 2)
+      const topKeywordsForHarvest = queryResult.combinedQuery.split(/\s+/).slice(0, 2).join(' ')
+      for (const [code] of topHarvestedCodes) {
+        try {
+          const ipcCql = `ic="${code}" AND ta all "${topKeywordsForHarvest}"`
+          const result = await patentSearchApiService.executeEpoSearchPublic(ipcCql, searchOptions)
+          if (result) {
+            allPatents.push(...result.patents)
+            this.sendProgress(window, runId, 1, 'researching', {
+              phase: 'harvested-ipc-search',
+              ipc: code,
+              found: result.patents.length
+            })
+          }
+        } catch (err) {
+          console.warn(`[patent-pipeline] Harvested IPC search failed for "${code}": ${err}`)
+        }
+      }
     } else {
-      // ── No-auth mode: LLM identifies patents → verify via Google Patents ──
-      this.sendProgress(window, runId, 1, 'researching', { phase: 'identifying', mode: 'no-auth' })
+      // ── No-auth mode: Use same claim-decomposition query → search Google Patents ──
+      this.sendProgress(window, runId, 1, 'researching', { phase: 'searching', mode: 'no-auth' })
 
-      const jurisdictionInstruction = run.jurisdiction === 'JP'
-        ? 'Focus exclusively on Japanese patent publications. Use the format JP followed by the publication number and kind code (e.g., JP2020123456A, JP6789012B2, JPH10123456A). Include both recent and older relevant patents.'
-        : run.jurisdiction === 'US'
-          ? 'Focus on US patent publications. Use the format US followed by the patent number (e.g., US10123456B2, US2020012345A1).'
-          : 'Include patents from all major jurisdictions (JP, US, EP, WO, CN, KR). Use standard patent number formats.'
+      // Use the same claim-decomposition prompt as auth mode for query generation
+      const queryResult = await llmService.structuredOutput({
+        prompt: `You are a patent examiner conducting a novelty search. Decompose the following invention into 3-5 distinct technical elements, then generate a focused search query for each element.
 
-      const identifyResult = await llmService.structuredOutput({
-        prompt: `You are a patent search expert. Based on the following invention description, identify 15-25 specific real patent publication numbers that are likely to be relevant prior art.
+TASK:
+1. Identify the key technical elements that make this invention distinct
+2. For each element, generate a focused keyword query
+3. Generate one combined query using the most distinctive terms
 
-${jurisdictionInstruction}
-
-IMPORTANT:
-- Provide REAL patent numbers that actually exist
-- Cover different technical aspects of the invention
-- Include the most relevant/closest prior art first
-- For each patent, explain briefly why it might be relevant
+CRITICAL RULES:
+- Every query MUST be in English only — no Japanese, no CJK characters
+- Each query is 3-8 English technical keywords separated by spaces
+- Do NOT use CQL syntax, field codes, quotes, or operators
+- Do NOT write sentences — only bare keywords
+- Think like a patent examiner: what specific terms distinguish this invention?
 
 Invention Description:
 ${run.inventionDescription}`,
-        systemPrompt: 'You are a patent prior art search specialist with deep knowledge of patent databases. Identify specific real patent numbers that are relevant to the given invention.',
+        systemPrompt: 'You are a patent examiner conducting a prior art novelty search. Decompose the invention into distinct technical elements and generate precise search queries. Output ONLY bare English technical keywords.',
         schema: {
           type: 'object',
           properties: {
-            patents: {
+            technicalElements: {
               type: 'array',
               items: {
                 type: 'object',
                 properties: {
-                  patentNumber: { type: 'string' },
-                  expectedTitle: { type: 'string' },
-                  relevanceReason: { type: 'string' },
-                  aspect: { type: 'string' }
+                  element: { type: 'string' },
+                  query: { type: 'string' }
                 },
-                required: ['patentNumber', 'expectedTitle', 'relevanceReason', 'aspect'],
+                required: ['element', 'query'],
                 additionalProperties: false
               }
-            }
+            },
+            combinedQuery: { type: 'string' }
           },
-          required: ['patents'],
+          required: ['technicalElements', 'combinedQuery'],
           additionalProperties: false
         }
-      }) as { patents: Array<{ patentNumber: string; expectedTitle: string; relevanceReason: string; aspect: string }> }
+      }) as { technicalElements: Array<{ element: string; query: string }>; combinedQuery: string }
 
-      searchQueries = identifyResult.patents.map(p => ({ query: p.patentNumber, aspect: p.aspect }))
-      this.sendProgress(window, runId, 1, 'researching', {
-        phase: 'verifying',
-        identified: identifyResult.patents.length
-      })
+      searchQueries = [
+        ...queryResult.technicalElements.map(te => ({ query: te.query, aspect: te.element })),
+        { query: queryResult.combinedQuery, aspect: 'combined' }
+      ]
 
-      // Verify each patent via Google Patents (no auth)
-      for (const identified of identifyResult.patents) {
+      // Search Google Patents for each query
+      for (const q of searchQueries) {
         try {
-          const patent = await patentSearchApiService.fetchPatentFromGoogle(identified.patentNumber)
-          if (patent) {
-            allPatents.push(patent)
-            this.sendProgress(window, runId, 1, 'researching', {
-              phase: 'verifying',
-              verified: identified.patentNumber,
-              found: allPatents.length
-            })
-          } else {
-            // If Google Patents doesn't have it, still save LLM-identified data
-            const countryMatch = identified.patentNumber.match(/^([A-Z]{2})/)
-            allPatents.push({
-              patentNumber: identified.patentNumber,
-              title: identified.expectedTitle,
-              abstract: identified.relevanceReason,
-              applicant: null,
-              inventors: [],
-              filingDate: null,
-              publicationDate: null,
-              jurisdiction: countryMatch ? countryMatch[1] : null,
-              classificationCodes: [],
-              url: `https://patents.google.com/patent/${identified.patentNumber.replace(/\s+/g, '')}`,
-              source: 'google'
-            })
-          }
-        } catch (err) {
-          console.warn(`[patent-pipeline] Google Patents fetch failed for ${identified.patentNumber}: ${err}`)
-          // Still save LLM-identified data as fallback
-          const countryMatch = identified.patentNumber.match(/^([A-Z]{2})/)
-          allPatents.push({
-            patentNumber: identified.patentNumber,
-            title: identified.expectedTitle,
-            abstract: identified.relevanceReason,
-            applicant: null,
-            inventors: [],
-            filingDate: null,
-            publicationDate: null,
-            jurisdiction: countryMatch ? countryMatch[1] : null,
-            classificationCodes: [],
-            url: `https://patents.google.com/patent/${identified.patentNumber.replace(/\s+/g, '')}`,
-            source: 'google'
+          const patents = await patentSearchApiService.searchGooglePatents(q.query, {
+            limit: 5,
+            jurisdiction: run.jurisdiction !== 'ALL' ? run.jurisdiction : undefined
           })
+          allPatents.push(...patents)
+          this.sendProgress(window, runId, 1, 'researching', {
+            phase: 'searching',
+            query: q.query,
+            found: patents.length
+          })
+        } catch (err) {
+          console.warn(`[patent-pipeline] Google Patents search failed for query "${q.query}": ${err}`)
         }
       }
     }
@@ -599,23 +664,35 @@ ${run.inventionDescription}`,
       return true
     })
 
-    // Round 3: Score relevance with LLM
-    const scoringPrompt = `Score the relevance of each prior art patent to the following invention. Rate each 0-100 (100 = most relevant) and categorize.
+    // Round 3: Score relevance with LLM — element-based scoring
+    const technicalElementsList = searchQueries
+      .filter(q => q.aspect !== 'combined')
+      .map((q, i) => `${i + 1}. ${q.aspect}`)
+      .join('\n')
+
+    const scoringPrompt = `Score the relevance of each prior art patent to the following invention. Evaluate each patent against the specific technical elements listed below.
 
 Invention:
 ${run.inventionDescription}
 
-Patents found:
-${uniquePatents.map((p, i) => `[${i + 1}] ${p.patentNumber} - ${p.title}${p.abstract ? ` - ${p.abstract.slice(0, 200)}` : ''}`).join('\n')}
+Technical Elements:
+${technicalElementsList}
 
-For each patent, provide a relevance score and a brief note explaining the relevance.`
+Patents found:
+${uniquePatents.map((p, i) => `[${i + 1}] ${p.patentNumber} - ${p.title}${p.abstract ? ` - ${p.abstract.slice(0, 800)}` : ''}`).join('\n')}
+
+For each patent:
+- Provide an overall relevance score 0-100 (100 = most relevant)
+- List which technical elements (by number) this patent is relevant to
+- Categorize as "core_prior_art" (directly overlaps key elements), "related_art" (overlaps some elements), or "background" (general field)
+- Provide a brief note explaining the relevance`
 
     let scoredPatents: Array<{ index: number; score: number; notes: string; category: string }> = []
 
     if (uniquePatents.length > 0) {
       const scoring = await llmService.structuredOutput({
         prompt: scoringPrompt,
-        systemPrompt: 'You are a patent analyst. Score patent relevance accurately.',
+        systemPrompt: 'You are a patent analyst specializing in prior art evaluation. Score patent relevance against specific technical elements of the invention. Be strict: only give high scores (>70) to patents that directly overlap with the core technical elements.',
         schema: {
           type: 'object',
           properties: {
@@ -626,10 +703,11 @@ For each patent, provide a relevance score and a brief note explaining the relev
                 properties: {
                   index: { type: 'number' },
                   score: { type: 'number' },
+                  relevantElements: { type: 'array', items: { type: 'number' } },
                   notes: { type: 'string' },
                   category: { type: 'string' }
                 },
-                required: ['index', 'score', 'notes', 'category'],
+                required: ['index', 'score', 'relevantElements', 'notes', 'category'],
                 additionalProperties: false
               }
             }
@@ -637,9 +715,15 @@ For each patent, provide a relevance score and a brief note explaining the relev
           required: ['patents'],
           additionalProperties: false
         }
-      }) as { patents: Array<{ index: number; score: number; notes: string; category: string }> }
+      }) as { patents: Array<{ index: number; score: number; relevantElements: number[]; notes: string; category: string }> }
 
-      scoredPatents = scoring.patents
+      // Merge relevantElements into notes for storage (reuse existing DB schema)
+      scoredPatents = scoring.patents.map(p => ({
+        ...p,
+        notes: p.relevantElements?.length
+          ? `[Elements: ${p.relevantElements.join(', ')}] ${p.notes}`
+          : p.notes
+      }))
     }
 
     // Save to DB

@@ -278,12 +278,14 @@ export class PatentSearchApiService {
     const rangeEnd = offset + limit - 1
 
     // Progressively broaden search until results are found:
-    // 1) ta any with all keywords (title+abstract, any match)
-    // 2) ta any with top 3 keywords (fewer = broader)
-    // 3) txt any with top 3 keywords (full-text = broadest)
+    // 1) ta all with all keywords (title+abstract, ALL must match — most precise)
+    // 2) ta all with top 3 keywords (fewer = broader, still precise)
+    // 3) ta any with top 3 keywords (any match — broad)
+    // 4) txt any with top 3 keywords (full-text = broadest)
     const strategies = [
-      this.buildEpoCql(keywords, options),
-      ...(keywords.length > 3 ? [this.buildEpoCql(keywords.slice(0, 3), options)] : []),
+      this.buildEpoCql(keywords, options, 'all'),
+      ...(keywords.length > 3 ? [this.buildEpoCql(keywords.slice(0, 3), options, 'all')] : []),
+      this.buildEpoCql(keywords.slice(0, 3), options, 'any'),
       `txt any "${keywords.slice(0, 3).join(' ')}"`,
     ]
 
@@ -297,7 +299,7 @@ export class PatentSearchApiService {
   }
 
   private extractEpoKeywords(query: string): string[] {
-    const stopWords = new Set(['and', 'or', 'not', 'the', 'for', 'with', 'from', 'that', 'this', 'are', 'was', 'has', 'have', 'been', 'using', 'based', 'method', 'system', 'device', 'apparatus', 'comprising', 'wherein', 'provided', 'includes', 'including'])
+    const stopWords = new Set(['and', 'or', 'not', 'the', 'for', 'with', 'from', 'that', 'this', 'are', 'was', 'has', 'have', 'been', 'using', 'based', 'comprising', 'wherein', 'provided', 'includes', 'including'])
     return query
       .replace(/[^\x20-\x7E]/g, ' ')       // Strip non-ASCII (Japanese etc.)
       .replace(/\b(ta|ti|ab|cl|txt|pa|in|pn|pd|ic)\s*[=]/g, ' ') // Strip CQL field codes
@@ -309,10 +311,11 @@ export class PatentSearchApiService {
       .slice(0, 8)
   }
 
-  private buildEpoCql(keywords: string[], options: PatentSearchOptions): string {
+  private buildEpoCql(keywords: string[], options: PatentSearchOptions, operator: 'all' | 'any' = 'all'): string {
     if (keywords.length === 0) return ''
-    // "ta any" matches documents containing ANY of the keywords in title+abstract
-    let cql = `ta any "${keywords.join(' ')}"`
+    // "ta all" = ALL keywords must appear in title+abstract (precise)
+    // "ta any" = ANY keyword may appear (broad)
+    let cql = `ta ${operator} "${keywords.join(' ')}"`
     if (options.dateFrom) {
       cql += ` AND pd>=${options.dateFrom.replace(/-/g, '')}`
     }
@@ -370,6 +373,16 @@ export class PatentSearchApiService {
     const result = this.parseEpoSearchResponse(data)
     console.log(`[patent-search] EPO search found: ${result.patents.length} patents (total: ${result.total})`)
     return result
+  }
+
+  // Public method for executing pre-built CQL queries (used by IPC classification search)
+  async executeEpoSearchPublic(cql: string, options: PatentSearchOptions = {}): Promise<PatentSearchResponse | null> {
+    await this.epoLimiter.wait()
+    const token = await this.getEpoAccessToken()
+    const limit = Math.min(options.limit || 25, 100)
+    const offset = options.offset || 1
+    const rangeEnd = offset + limit - 1
+    return this.executeEpoSearch(cql, token, offset, rangeEnd)
   }
 
   private parseEpoSearchResponse(data: Record<string, unknown>): PatentSearchResponse {
@@ -714,6 +727,53 @@ export class PatentSearchApiService {
 
   hasEpoCredentials(): boolean {
     return !!(this.consumerKey && this.consumerSecret)
+  }
+
+  /**
+   * Search Google Patents by keywords and return patent numbers found in results.
+   * Scrapes the search results page — no authentication required.
+   */
+  async searchGooglePatents(query: string, options: { limit?: number; jurisdiction?: string } = {}): Promise<PatentSearchResult[]> {
+    await this.googleLimiter.wait()
+
+    const limit = options.limit || 10
+    const encodedQuery = encodeURIComponent(query)
+    // Build Google Patents search URL with optional country filter
+    let searchUrl = `https://patents.google.com/?q=${encodedQuery}&num=${limit}`
+    if (options.jurisdiction) {
+      searchUrl += `&country=${options.jurisdiction}`
+    }
+
+    try {
+      const html = await this.fetchHtmlWithProxy(searchUrl)
+      if (!html) return []
+
+      // Extract patent numbers from search result links
+      // Google Patents uses links like /patent/US10123456B2/ or /patent/JP2020123456A/
+      const patentRegex = /\/patent\/([A-Z]{2}\d[\w]+)\b/g
+      const foundNumbers = new Set<string>()
+      let match: RegExpExecArray | null
+      while ((match = patentRegex.exec(html)) !== null) {
+        foundNumbers.add(match[1])
+      }
+
+      // Fetch details for each found patent
+      const patents: PatentSearchResult[] = []
+      for (const pn of [...foundNumbers].slice(0, limit)) {
+        try {
+          const detail = await this.fetchPatentFromGoogle(pn)
+          if (detail) patents.push(detail)
+        } catch {
+          // Skip individual fetch failures
+        }
+      }
+
+      console.log(`[patent-search] Google Patents search found: ${patents.length} patents for query: ${query}`)
+      return patents
+    } catch (err) {
+      console.warn(`[patent-search] Google Patents search failed: ${err}`)
+      return []
+    }
   }
 
   /**
