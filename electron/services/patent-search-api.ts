@@ -259,16 +259,7 @@ export class PatentSearchApiService {
     const offset = options.offset || 1
 
     // Build CQL query for EPO OPS
-    // Truncate query so the encoded URL stays under ~1800 chars.
-    // Japanese/CJK characters expand 3× in UTF-8 and 9× when percent-encoded,
-    // so we must check the encoded length, not the raw character count.
     let cql = query
-    while (encodeURIComponent(cql).length > 1400) {
-      // Drop roughly the last word / token
-      const trimmed = cql.replace(/[\s\S]{1,20}$/, '')
-      if (trimmed === cql || trimmed.length === 0) { cql = cql.slice(0, Math.floor(cql.length / 2)); break }
-      cql = trimmed
-    }
     if (options.jurisdiction) {
       cql += ` AND pn=${options.jurisdiction}`
     }
@@ -280,18 +271,22 @@ export class PatentSearchApiService {
     }
 
     const rangeEnd = offset + limit - 1
-    const encodedQuery = encodeURIComponent(cql)
 
-    const searchUrl = `https://ops.epo.org/3.2/rest-services/published-data/search?q=${encodedQuery}&Range=${offset}-${rangeEnd}`
+    // Use POST to avoid URL length limits (413).
+    // Pagination uses X-OPS-Range header per EPO OPS specification.
+    // Ref: python-epo-ops-client, EPO OPS v3.2 docs
     console.log(`[patent-search] EPO search CQL: ${cql}`)
-    console.log(`[patent-search] EPO search URL length: ${searchUrl.length}`)
 
     const response = await httpsRequest({
-      url: searchUrl,
+      url: 'https://ops.epo.org/3.2/rest-services/published-data/search',
+      method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,
-        'Accept': 'application/json'
-      }
+        'Accept': 'application/json',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-OPS-Range': `${offset}-${rangeEnd}`
+      },
+      body: `q=${encodeURIComponent(cql)}`
     })
 
     console.log(`[patent-search] EPO search response: ${response.status} ${response.statusText}`)
