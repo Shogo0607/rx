@@ -282,15 +282,19 @@ export class PatentSearchApiService {
     const rangeEnd = offset + limit - 1
     const encodedQuery = encodeURIComponent(cql)
 
-    // EPO OPS search is GET-only; Range is an HTTP header
+    const searchUrl = `https://ops.epo.org/3.2/rest-services/published-data/search?q=${encodedQuery}&Range=${offset}-${rangeEnd}`
+    console.log(`[patent-search] EPO search CQL: ${cql}`)
+    console.log(`[patent-search] EPO search URL length: ${searchUrl.length}`)
+
     const response = await httpsRequest({
-      url: `https://ops.epo.org/3.2/rest-services/published-data/search?q=${encodedQuery}`,
+      url: searchUrl,
       headers: {
         'Authorization': `Bearer ${token}`,
-        'Accept': 'application/json',
-        'Range': `${offset}-${rangeEnd}`
+        'Accept': 'application/json'
       }
     })
+
+    console.log(`[patent-search] EPO search response: ${response.status} ${response.statusText}`)
 
     if (!response.ok) {
       if (response.status === 404) {
@@ -303,11 +307,15 @@ export class PatentSearchApiService {
         this.oauthToken = null // Token may have expired
         throw new Error('EPO OPS access forbidden. Token may have expired, please retry.')
       }
+      const errorBody = await response.text()
+      console.warn(`[patent-search] EPO error body: ${errorBody.slice(0, 500)}`)
       throw new Error(`EPO OPS API error: ${response.status} ${response.statusText}`)
     }
 
     const data = await response.json() as Record<string, unknown>
-    return this.parseEpoSearchResponse(data)
+    const result = this.parseEpoSearchResponse(data)
+    console.log(`[patent-search] EPO search found: ${result.patents.length} patents (total: ${result.total})`)
+    return result
   }
 
   private parseEpoSearchResponse(data: Record<string, unknown>): PatentSearchResponse {
